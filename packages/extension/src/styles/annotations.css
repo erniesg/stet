@@ -141,3 +141,263 @@ stet-mark:hover {
   color: #2d3748;
   text-decoration: underline;
 }
+
+/* Version history */
+.stet-history-root {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 2147483646;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 12px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+.stet-history-button {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 180px;
+  padding: 10px 14px;
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.96);
+  color: #0f172a;
+  box-shadow: 0 18px 45px rgba(15, 23, 42, 0.16);
+  cursor: pointer;
+  backdrop-filter: blur(14px);
+  text-align: left;
+}
+
+.stet-history-button:hover {
+  border-color: rgba(37, 99, 235, 0.28);
+  transform: translateY(-1px);
+}
+
+.stet-history-button-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.stet-history-button-meta {
+  font-size: 11px;
+  color: #475569;
+}
+
+.stet-history-panel {
+  width: min(420px, calc(100vw - 24px));
+  max-height: min(78vh, 760px);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 18px;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.985);
+  color: #0f172a;
+  box-shadow: 0 30px 80px rgba(15, 23, 42, 0.2);
+}
+
+.stet-history-panel-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.stet-history-panel-title-group {
+  min-width: 0;
+}
+
+.stet-history-panel-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.stet-history-panel-target {
+  margin-top: 4px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #0f172a;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.stet-history-panel-subtitle {
+  margin-top: 2px;
+  font-size: 11px;
+  color: #64748b;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.stet-history-close {
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: 999px;
+  background: #f1f5f9;
+  color: #334155;
+  cursor: pointer;
+  font-size: 22px;
+  line-height: 1;
+}
+
+.stet-history-close:hover {
+  background: #e2e8f0;
+}
+
+.stet-history-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.stet-history-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+}
+
+.stet-history-section-heading {
+  font-size: 11px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: #64748b;
+  font-weight: 700;
+}
+
+.stet-history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 208px;
+  overflow: auto;
+}
+
+.stet-history-list-item {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 10px 12px;
+  border: 1px solid #dbe4ee;
+  border-radius: 12px;
+  background: #fff;
+  color: #0f172a;
+  cursor: pointer;
+  text-align: left;
+}
+
+.stet-history-list-item:hover,
+.stet-history-list-item.is-selected {
+  border-color: rgba(37, 99, 235, 0.42);
+  background: #eff6ff;
+}
+
+.stet-history-list-line {
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.stet-history-list-meta {
+  color: #64748b;
+}
+
+.stet-history-empty {
+  font-size: 12px;
+  line-height: 1.5;
+  color: #64748b;
+  padding: 10px 0 2px;
+}
+
+.stet-history-preview {
+  flex: 1;
+}
+
+.stet-history-preview-summary {
+  font-size: 12px;
+  line-height: 1.5;
+  color: #334155;
+}
+
+.stet-history-diff {
+  min-height: 150px;
+  max-height: 280px;
+  overflow: auto;
+  padding: 14px;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: #f8fafc;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #0f172a;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.stet-history-preview-note {
+  margin: 0;
+  color: #64748b;
+}
+
+.stet-history-insert {
+  background: rgba(34, 197, 94, 0.16);
+  color: #166534;
+  text-decoration: none;
+}
+
+.stet-history-delete {
+  background: rgba(239, 68, 68, 0.16);
+  color: #991b1b;
+  text-decoration: line-through;
+}
+
+.stet-history-primary-btn,
+.stet-history-secondary-btn {
+  border: none;
+  border-radius: 10px;
+  cursor: pointer;
+  font-weight: 600;
+  transition: opacity 0.15s, transform 0.15s;
+}
+
+.stet-history-primary-btn {
+  padding: 11px 14px;
+  background: #2563eb;
+  color: #fff;
+}
+
+.stet-history-primary-btn:hover:not(:disabled),
+.stet-history-secondary-btn:hover {
+  transform: translateY(-1px);
+}
+
+.stet-history-primary-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.stet-history-secondary-btn {
+  padding: 8px 12px;
+  background: #e2e8f0;
+  color: #0f172a;
+}
+
+@media (max-width: 720px) {
+  .stet-history-root {
+    right: 12px;
+    left: 12px;
+    bottom: 12px;
+  }
+
+  .stet-history-button,
+  .stet-history-panel {
+    width: 100%;
+  }
+}

@@ -32,8 +32,8 @@ export const DEFAULT_STORED_SETTINGS: StoredSettings = {
 /** Load settings from chrome.storage.sync */
 export async function loadSettings(): Promise<StoredSettings> {
   return new Promise((resolve) => {
-    chrome.storage.sync.get(DEFAULT_STORED_SETTINGS, (result) => {
-      resolve(result as StoredSettings);
+    chrome.storage.sync.get(DEFAULT_STORED_SETTINGS as unknown as Record<string, unknown>, (result) => {
+      resolve(result as unknown as StoredSettings);
     });
   });
 }
@@ -58,4 +58,3 @@ export async function updateUserOverrides(patch: Partial<UserOverrides>): Promis
     userOverrides: { ...userOverrides, ...patch },
   });
 }
-

@@ -67,8 +67,8 @@ export async function loadDictionary(
 export async function loadCustomTerms(): Promise<string[]> {
   return new Promise((resolve) => {
     try {
-      chrome.storage.sync.get({ stet_custom_terms: [] }, (result) => {
-        resolve(result.stet_custom_terms || []);
+      chrome.storage.sync.get({ stet_custom_terms: [] as string[] }, (result) => {
+        resolve((result.stet_custom_terms as string[] | undefined) || []);
       });
     } catch {
       resolve([]);
@@ -97,7 +97,7 @@ function getCached(): Promise<CachedDictionary | null> {
   return new Promise((resolve) => {
     try {
       chrome.storage.local.get(CACHE_KEY, (result) => {
-        resolve(result[CACHE_KEY] || null);
+        resolve((result[CACHE_KEY] as CachedDictionary | undefined) || null);
       });
     } catch {
       resolve(null);

@@ -5,9 +5,11 @@
 
 import { commonPack } from 'stet';
 import { initChecker } from './checker.js';
+import { initVersionHistory } from './version-history-manager.js';
 
 // Register common pack
 void commonPack;
 
 // Start
 initChecker();
+initVersionHistory();

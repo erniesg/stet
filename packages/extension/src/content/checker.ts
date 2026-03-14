@@ -13,6 +13,10 @@ import type { ResolvedStetConfig, Issue, DocumentIssue } from 'stet';
 import { extractText } from './text-extractor.js';
 import { AnnotationManager } from './annotation-manager.js';
 import { loadDictionary, loadCustomTerms } from './dictionary-loader.js';
+import {
+  discoverAnnotatableEditables,
+  findAnnotatableEditable,
+} from './editable-target.js';
 
 const managers = new Map<HTMLElement, AnnotationManager>();
 let config: ResolvedStetConfig | null = null;
@@ -189,7 +193,7 @@ function attachListener(el: HTMLElement) {
 }
 
 function discoverEditables() {
-  document.querySelectorAll<HTMLElement>('[contenteditable="true"]').forEach(attachListener);
+  discoverAnnotatableEditables().forEach(attachListener);
 }
 
 function observeDOM() {
@@ -198,14 +202,14 @@ function observeDOM() {
     for (const mutation of mutations) {
       for (const node of mutation.addedNodes) {
         if (node instanceof HTMLElement) {
-          if (node.isContentEditable) attachListener(node);
-          node.querySelectorAll?.<HTMLElement>('[contenteditable="true"]')
-            .forEach(attachListener);
+          const editable = findAnnotatableEditable(node);
+          if (editable) attachListener(editable);
+          discoverAnnotatableEditables(node).forEach(attachListener);
         }
       }
     }
   });
-  observer.observe(document.body, { childList: true, subtree: true });
+  observer.observe(document.body ?? document.documentElement, { childList: true, subtree: true });
 }
 
 // ---------------------------------------------------------------------------
