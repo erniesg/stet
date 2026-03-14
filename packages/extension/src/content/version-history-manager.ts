@@ -31,6 +31,7 @@ import {
   type HistoryRuntimeConfig,
   type HistoryUiMode,
 } from '../history-settings.js';
+import { setManagedVisibility } from './ui-visibility.js';
 
 class HistorySession {
   public record: EditableHistoryRecord | null = null;
@@ -340,7 +341,6 @@ export class VersionHistoryManager {
     this.button.append(this.buttonTitle, this.buttonMeta);
 
     this.panel.className = 'stet-history-panel';
-    this.panel.hidden = true;
 
     const header = document.createElement('div');
     header.className = 'stet-history-panel-header';
@@ -437,6 +437,9 @@ export class VersionHistoryManager {
     this.root.append(this.button, this.panel);
 
     (document.body ?? document.documentElement).appendChild(this.root);
+    setManagedVisibility(this.root, false, 'flex');
+    setManagedVisibility(this.button, false, 'flex');
+    setManagedVisibility(this.panel, false, 'flex');
 
     logHistoryEvent('history:mount', {}, { debug: this.runtime.debug });
     this.updateFloatingPosition('mount', true);
@@ -542,7 +545,9 @@ export class VersionHistoryManager {
     if (!this.activeSession) return;
 
     this.isPanelOpen = true;
-    this.panel.hidden = false;
+    setManagedVisibility(this.root, true, 'flex');
+    setManagedVisibility(this.button, true, 'flex');
+    setManagedVisibility(this.panel, true, 'flex');
     this.updateFloatingPosition('open-pending');
 
     await this.activeSession.ensureLoaded();
@@ -556,7 +561,7 @@ export class VersionHistoryManager {
 
   private closePanel() {
     this.isPanelOpen = false;
-    this.panel.hidden = true;
+    setManagedVisibility(this.panel, false, 'flex');
     logHistoryEvent('history:close', {}, { debug: this.runtime.debug });
     this.updateFloatingPosition('close', true);
   }
@@ -587,10 +592,18 @@ export class VersionHistoryManager {
     const session = this.activeSession;
     const hasActiveElement = session?.target.element.isConnected ?? false;
 
-    this.button.hidden = !hasActiveElement;
     if (!hasActiveElement || !session) {
+      setManagedVisibility(this.panel, false, 'flex');
+      setManagedVisibility(this.button, false, 'flex');
+      setManagedVisibility(this.root, false, 'flex');
       this.updateFloatingPosition('render-button');
       return;
+    }
+
+    setManagedVisibility(this.root, true, 'flex');
+    setManagedVisibility(this.button, true, 'flex');
+    if (!this.isPanelOpen) {
+      setManagedVisibility(this.panel, false, 'flex');
     }
 
     const versions = session.record?.snapshots ?? [];
@@ -859,8 +872,9 @@ export class VersionHistoryManager {
 
     const session = this.activeSession;
     if (!session || !session.target.element.isConnected) {
-      this.button.hidden = true;
-      this.panel.hidden = true;
+      setManagedVisibility(this.panel, false, 'flex');
+      setManagedVisibility(this.button, false, 'flex');
+      setManagedVisibility(this.root, false, 'flex');
       if (log) this.logPosition(source);
       return;
     }
@@ -879,24 +893,26 @@ export class VersionHistoryManager {
       chipWidth: this.button.offsetWidth || 164,
       chipHeight: this.button.offsetHeight || 44,
       panelWidth: this.panel.offsetWidth || 420,
-      panelHeight: this.panel.hidden ? 420 : (this.panel.offsetHeight || 420),
+      panelHeight: this.isPanelOpen ? (this.panel.offsetHeight || 420) : 420,
       panelOpen: this.isPanelOpen,
       obstacles,
     });
 
     if (!layout.visible) {
-      this.button.hidden = true;
-      this.panel.hidden = true;
+      setManagedVisibility(this.panel, false, 'flex');
+      setManagedVisibility(this.button, false, 'flex');
+      setManagedVisibility(this.root, false, 'flex');
       if (log) this.logPosition(source);
       return;
     }
 
-    this.button.hidden = false;
+    setManagedVisibility(this.root, true, 'flex');
+    setManagedVisibility(this.button, true, 'flex');
     this.button.style.left = `${layout.chip.left}px`;
     this.button.style.top = `${layout.chip.top}px`;
     this.button.style.width = `${layout.chip.width}px`;
 
-    this.panel.hidden = !this.isPanelOpen;
+    setManagedVisibility(this.panel, this.isPanelOpen, 'flex');
     this.panel.style.left = `${layout.panel.left}px`;
     this.panel.style.top = `${layout.panel.top}px`;
     this.panel.style.width = `${layout.panel.width}px`;

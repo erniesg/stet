@@ -1,4 +1,5 @@
 import type { Issue } from 'stet';
+import { setManagedVisibility } from './ui-visibility.js';
 
 type ApplySelectedFixes = (element: HTMLElement, issueKeys: string[]) => Promise<number>;
 
@@ -68,7 +69,6 @@ export class IssuePanelManager {
     this.button.append(this.buttonTitle, this.buttonMeta);
 
     this.panel.className = 'stet-issues-panel';
-    this.panel.hidden = true;
 
     const header = document.createElement('div');
     header.className = 'stet-issues-panel-header';
@@ -118,25 +118,40 @@ export class IssuePanelManager {
     this.panel.append(header, this.issueList, this.emptyState, this.applyButton);
     this.root.append(this.button, this.panel);
     (document.body ?? document.documentElement).appendChild(this.root);
+    setManagedVisibility(this.root, false, 'flex');
+    setManagedVisibility(this.button, false, 'flex');
+    setManagedVisibility(this.panel, false, 'flex');
   }
 
   private open() {
     this.isOpen = true;
-    this.panel.hidden = false;
+    setManagedVisibility(this.root, true, 'flex');
+    setManagedVisibility(this.button, true, 'flex');
+    setManagedVisibility(this.panel, true, 'flex');
     this.renderPanel();
   }
 
   private close() {
     this.isOpen = false;
-    this.panel.hidden = true;
+    setManagedVisibility(this.panel, false, 'flex');
   }
 
   private renderButton() {
     const issues = this.activeElement ? (this.issuesByElement.get(this.activeElement) ?? []) : [];
     const fixable = issues.filter(isFixableIssue);
 
-    this.button.hidden = this.activeElement === null;
-    if (this.activeElement === null) return;
+    if (this.activeElement === null) {
+      setManagedVisibility(this.panel, false, 'flex');
+      setManagedVisibility(this.button, false, 'flex');
+      setManagedVisibility(this.root, false, 'flex');
+      return;
+    }
+
+    setManagedVisibility(this.root, true, 'flex');
+    setManagedVisibility(this.button, true, 'flex');
+    if (!this.isOpen) {
+      setManagedVisibility(this.panel, false, 'flex');
+    }
 
     this.buttonMeta.textContent = issues.length === 0
       ? 'No issues detected'
