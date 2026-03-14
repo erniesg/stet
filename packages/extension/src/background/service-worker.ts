@@ -1,5 +1,5 @@
 /**
- * Background service worker for the Hammurabi extension.
+ * Background service worker for the Stet extension.
  * Handles: settings, FX rate caching, badge updates, LLM proxy.
  */
 

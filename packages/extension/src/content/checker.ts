@@ -12,6 +12,7 @@ import { check, checkDocument, toCheckOptions, listPacks } from 'stet';
 import type { ResolvedStetConfig, Issue, DocumentIssue } from 'stet';
 import { extractText } from './text-extractor.js';
 import { AnnotationManager } from './annotation-manager.js';
+import { loadDictionary, loadCustomTerms } from './dictionary-loader.js';
 
 const managers = new Map<HTMLElement, AnnotationManager>();
 let config: ResolvedStetConfig | null = null;
@@ -27,7 +28,7 @@ const FALLBACK_CONFIG: ResolvedStetConfig = {
   packConfig: { freThreshold: 30, paragraphCharLimit: 320 },
   rules: { enable: [], disable: [] }, dictionaries: [], prompts: {},
   workflows: {}, feedback: { endpoint: null, batchSize: 20, includeContext: false },
-  enabled: true, siteAllowlist: [], debounceMs: 800,
+  enabled: true, siteAllowlist: [], debounceMs: 400,
 };
 
 async function loadConfig(): Promise<ResolvedStetConfig> {
@@ -80,23 +81,41 @@ function getIssues(element: HTMLElement): Issue[] {
     { ...opts, onDiagnostic: (d) => console.warn('[stet] Rule error:', d.ruleId, d.error) },
   );
 
-  // Convert DocumentIssue offsets to flat-text offsets for annotation
-  // checkDocument returns offsets relative to each section, we need global offsets
+  // Convert DocumentIssue offsets to flat innerText offsets for annotation.
+  // Use indexOf on the original innerText to find each section's true start
+  // position, avoiding drift from trimmed whitespace or variable separators.
+  const fullText = text; // innerText from extractText() above
   const flatIssues: Issue[] = [];
-  let headlineLen = headline ? headline.length + 2 : 0; // +2 for the \n\n separator
+
+  // Build a map of section → start position in fullText
+  const sectionStarts = new Map<string, number>();
+  let searchFrom = 0;
+
+  if (headline) {
+    const hlStart = fullText.indexOf(headline, searchFrom);
+    if (hlStart >= 0) {
+      sectionStarts.set('headline', hlStart);
+      searchFrom = hlStart + headline.length;
+    }
+  }
+
+  for (let i = 0; i < body.length; i++) {
+    const paraStart = fullText.indexOf(body[i], searchFrom);
+    if (paraStart >= 0) {
+      sectionStarts.set(`body:${i}`, paraStart);
+      searchFrom = paraStart + body[i].length;
+    }
+  }
 
   for (const issue of issues) {
     const di = issue as DocumentIssue;
-    let globalOffset = issue.offset;
+    let globalOffset: number;
 
-    if (di.section === 'body' && di.paragraphIndex !== undefined) {
-      // Calculate offset: headline + preceding paragraphs + separators
-      let offset = headlineLen;
-      for (let i = 0; i < di.paragraphIndex; i++) {
-        offset += body[i].length + 2; // +2 for \n\n between paragraphs
-      }
-      globalOffset = offset + issue.offset;
-    } else if (di.section === 'headline') {
+    if (di.section === 'headline') {
+      globalOffset = (sectionStarts.get('headline') ?? 0) + issue.offset;
+    } else if (di.section === 'body' && di.paragraphIndex !== undefined) {
+      globalOffset = (sectionStarts.get(`body:${di.paragraphIndex}`) ?? 0) + issue.offset;
+    } else {
       globalOffset = issue.offset;
     }
 
@@ -194,9 +213,34 @@ function observeDOM() {
 // ---------------------------------------------------------------------------
 
 /**
- * Initialize the checker. Call this AFTER registering all packs.
+ * Load the spell-check dictionary from CDN and cache locally.
+ * Runs in the background — doesn't block checker startup.
+ * Returns the word list (or empty array on failure).
  */
-export async function initChecker() {
+async function loadSpellCheckDictionary(): Promise<string[]> {
+  try {
+    const [words, customTerms] = await Promise.all([
+      loadDictionary(),
+      loadCustomTerms(),
+    ]);
+    return [...words, ...customTerms];
+  } catch (err) {
+    console.warn('[stet] Dictionary load failed:', err);
+    return [];
+  }
+}
+
+/** Callback type for dictionary loading hook */
+export type OnDictionaryLoaded = (words: string[]) => void;
+
+/**
+ * Initialize the checker. Call this AFTER registering all packs.
+ *
+ * @param onDictionaryLoaded — optional callback invoked when the spell-check
+ *   dictionary is ready. Packs use this to feed words into their spell-check
+ *   rules (e.g., `loadWordList(words)` in bt-pack).
+ */
+export async function initChecker(onDictionaryLoaded?: OnDictionaryLoaded) {
   config = await loadConfig();
 
   // Override config packs with whatever is actually registered
@@ -225,4 +269,12 @@ export async function initChecker() {
 
   discoverEditables();
   observeDOM();
+
+  // Load dictionary in the background — doesn't block initial check
+  loadSpellCheckDictionary().then((words) => {
+    if (words.length > 0 && onDictionaryLoaded) {
+      onDictionaryLoaded(words);
+      console.log(`[stet] Dictionary ready (${words.length} words)`);
+    }
+  });
 }

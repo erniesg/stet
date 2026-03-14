@@ -148,6 +148,38 @@ export class AnnotationManager {
     this.element = element;
   }
 
+  /**
+   * Build a text-node-to-innerText-offset map.
+   * Uses indexOf on the element's innerText to find each text node's
+   * true position, automatically accounting for \n/\n\n separators
+   * that innerText inserts for <br> and block elements.
+   */
+  private buildNodeMap(): { node: Text; start: number; end: number }[] {
+    const innerText = this.element.innerText || '';
+    const entries: { node: Text; start: number; end: number }[] = [];
+    const walker = document.createTreeWalker(this.element, NodeFilter.SHOW_TEXT);
+
+    let searchFrom = 0;
+    let node: Text | null;
+
+    while ((node = walker.nextNode() as Text | null)) {
+      const content = node.textContent || '';
+      if (!content) continue;
+
+      // Skip whitespace-only nodes between block elements —
+      // these don't appear in innerText
+      if (!content.trim() && !content.includes('\u00a0')) continue;
+
+      const idx = innerText.indexOf(content, searchFrom);
+      if (idx >= 0) {
+        entries.push({ node, start: idx, end: idx + content.length });
+        searchFrom = idx + content.length;
+      }
+    }
+
+    return entries;
+  }
+
   clear(): void {
     closeCard();
     for (const mark of this.marks) {
@@ -167,16 +199,11 @@ export class AnnotationManager {
 
     const sorted = [...issues].sort((a, b) => b.offset - a.offset);
 
-    // Build flat text node map
-    const textNodes: { node: Text; start: number; end: number }[] = [];
-    let offset = 0;
-    const walker = document.createTreeWalker(this.element, NodeFilter.SHOW_TEXT);
-    let node: Text | null;
-    while ((node = walker.nextNode() as Text | null)) {
-      const len = node.textContent?.length || 0;
-      textNodes.push({ node, start: offset, end: offset + len });
-      offset += len;
-    }
+    // Build text node map aligned to innerText offsets.
+    // innerText inserts \n for <br> and \n\n for block elements,
+    // but TreeWalker only sees raw text nodes. We correlate each
+    // text node to its position in innerText via sequential indexOf.
+    const textNodes = this.buildNodeMap();
 
     for (const issue of sorted) {
       const issueStart = issue.offset;

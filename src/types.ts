@@ -160,8 +160,10 @@ export interface RulePack {
   description: string;
   /** The rules in this pack */
   rules: RuleDefinition[];
-  /** Tenant-specific dictionaries */
+  /** Tenant-specific dictionaries (wrong → correct mappings) */
   dictionaries?: DictionaryEntry[];
+  /** Valid terms that should never be flagged by spell check (proper nouns, brand names, etc.) */
+  validTerms?: string[];
   /** Pack-specific configuration */
   config: PackConfig;
 }

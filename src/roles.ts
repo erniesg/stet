@@ -4,7 +4,7 @@ export const JOURNALIST: RolePreset = {
   id: 'journalist',
   name: 'Journalist',
   description: 'Content accuracy and house style — readability checks off by default',
-  enabledCategories: ['style', 'numbers', 'terminology', 'dictionary', 'currency', 'punctuation', 'contraction'],
+  enabledCategories: ['style', 'numbers', 'terminology', 'dictionary', 'currency', 'punctuation', 'contraction', 'capitalization', 'spelling'],
   disabledCategories: ['readability', 'objectivity'],
 };
 
@@ -15,6 +15,7 @@ export const SUB_EDITOR: RolePreset = {
   enabledCategories: [
     'style', 'numbers', 'terminology', 'dictionary', 'currency',
     'punctuation', 'readability', 'objectivity', 'contraction', 'wire',
+    'capitalization', 'spelling',
   ],
   disabledCategories: [],
 };
