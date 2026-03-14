@@ -168,7 +168,7 @@ function runCheckAndAnnotate(element: HTMLElement) {
     requestAnimationFrame(() => { selfMutating = false; });
   }
 
-  updateBadge(issues.length);
+  syncBadge();
 }
 
 function scheduleCheck(element: HTMLElement) {
@@ -181,6 +181,44 @@ function scheduleCheck(element: HTMLElement) {
 
 function updateBadge(count: number) {
   try { chrome.runtime.sendMessage({ type: 'UPDATE_BADGE', count }); } catch {}
+}
+
+function pruneDisconnectedElements() {
+  for (const [element] of managers) {
+    if (element.isConnected) continue;
+    managers.delete(element);
+    latestIssues.delete(element);
+    issuePanel?.removeElement(element);
+    const timer = timers.get(element);
+    if (timer) clearTimeout(timer);
+    timers.delete(element);
+  }
+}
+
+function getPageIssueCount(): number {
+  pruneDisconnectedElements();
+
+  let total = 0;
+  for (const [element, issues] of latestIssues) {
+    if (!element.isConnected) continue;
+    total += issues.length;
+  }
+  return total;
+}
+
+function syncBadge() {
+  updateBadge(getPageIssueCount());
+}
+
+function findEditableForNode(node: Node | null): HTMLElement | null {
+  if (!node) return null;
+  if (node instanceof HTMLElement) {
+    return findAnnotatableEditable(node);
+  }
+  if (node.parentElement) {
+    return findAnnotatableEditable(node.parentElement);
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -204,23 +242,47 @@ function attachListener(el: HTMLElement) {
 }
 
 function discoverEditables() {
+  pruneDisconnectedElements();
   discoverAnnotatableEditables().forEach(attachListener);
+  syncBadge();
 }
 
 function observeDOM() {
   const observer = new MutationObserver((mutations) => {
     if (selfMutating) return;
+
+    pruneDisconnectedElements();
+    const changedEditables = new Set<HTMLElement>();
+
     for (const mutation of mutations) {
+      const mutationEditable = findEditableForNode(mutation.target);
+      if (mutationEditable) changedEditables.add(mutationEditable);
+
       for (const node of mutation.addedNodes) {
+        const changedEditable = findEditableForNode(node);
+        if (changedEditable) changedEditables.add(changedEditable);
+
         if (node instanceof HTMLElement) {
           const editable = findAnnotatableEditable(node);
           if (editable) attachListener(editable);
-          discoverAnnotatableEditables(node).forEach(attachListener);
+          discoverAnnotatableEditables(node).forEach((discovered) => {
+            attachListener(discovered);
+            changedEditables.add(discovered);
+          });
         }
       }
     }
+
+    changedEditables.forEach((editable) => {
+      if (editable.isConnected) scheduleCheck(editable);
+    });
+    syncBadge();
   });
-  observer.observe(document.body ?? document.documentElement, { childList: true, subtree: true });
+  observer.observe(document.body ?? document.documentElement, {
+    childList: true,
+    subtree: true,
+    characterData: true,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -312,6 +374,7 @@ export async function initChecker(onDictionaryLoaded?: OnDictionaryLoaded) {
     return applied;
   });
 
+  updateBadge(0);
   discoverEditables();
   observeDOM();
   issuePanel.setActiveElement(findAnnotatableEditable(document.activeElement));

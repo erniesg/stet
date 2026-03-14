@@ -5,6 +5,14 @@
 
 import { loadSettings, saveSettings, getEffectiveConfig, DEFAULT_STORED_SETTINGS } from '../storage/settings.js';
 
+function setBadgeForTab(tabId: number, count: number) {
+  chrome.action.setBadgeText({ text: count > 0 ? String(count) : '', tabId });
+  chrome.action.setBadgeBackgroundColor({
+    color: count > 0 ? '#e74c3c' : '#2ecc71',
+    tabId,
+  });
+}
+
 chrome.runtime.onInstalled.addListener(async () => {
   console.log('[Stet] Style checker installed');
 
@@ -15,7 +23,7 @@ chrome.runtime.onInstalled.addListener(async () => {
   }
 });
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   switch (message.type) {
     case 'GET_SETTINGS':
       // Return the effective config (resolved + user overrides)
@@ -45,7 +53,17 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       return true;
 
     case 'UPDATE_BADGE':
-      chrome.action.setBadgeText({ text: String(message.count || ''), tabId: message.tabId });
+      if (typeof message.tabId === 'number') {
+        setBadgeForTab(message.tabId, message.count || 0);
+        break;
+      }
+
+      if (typeof sender.tab?.id === 'number') {
+        setBadgeForTab(sender.tab.id, message.count || 0);
+        break;
+      }
+
+      chrome.action.setBadgeText({ text: message.count > 0 ? String(message.count) : '' });
       chrome.action.setBadgeBackgroundColor({ color: message.count > 0 ? '#e74c3c' : '#2ecc71' });
       break;
   }
