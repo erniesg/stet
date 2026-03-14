@@ -55,6 +55,18 @@ function setBadgeForTab(tabId: number, count: number) {
   });
 }
 
+function broadcastTabIssueState(tabId: number) {
+  try {
+    chrome.runtime.sendMessage({
+      type: 'TAB_ISSUES_UPDATED',
+      tabId,
+      state: getTabIssueState(tabId),
+    }, () => {
+      void chrome.runtime.lastError;
+    });
+  } catch {}
+}
+
 function getFrameStates(tabId: number): Map<number, FrameIssueState> {
   let states = tabIssueStates.get(tabId);
   if (!states) {
@@ -126,11 +138,13 @@ function getTabIssueState(tabId: number): TabIssueState {
 
 function syncBadgeFromState(tabId: number) {
   setBadgeForTab(tabId, getTabIssueState(tabId).totalIssues);
+  broadcastTabIssueState(tabId);
 }
 
 function clearTabIssueState(tabId: number) {
   tabIssueStates.delete(tabId);
   setBadgeForTab(tabId, 0);
+  broadcastTabIssueState(tabId);
 }
 
 chrome.tabs.onRemoved.addListener((tabId) => {

@@ -366,12 +366,16 @@ export class AnnotationManager {
             showCard(mark, issue,
               // onApply
               (selectedIssue) => {
+                if (issue.issueId) {
+                  this.removeIssueMarks(issue.issueId);
+                } else {
+                  unwrapMark(mark);
+                }
+
                 if (this.onApplyIssue) {
                   this.onApplyIssue(selectedIssue);
                   return;
                 }
-
-                unwrapMark(mark);
               },
               // onIgnore
               () => {

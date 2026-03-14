@@ -57,6 +57,7 @@ function Popup() {
   const [packs, setPacks] = useState<string[]>([]);
   const [role, setRole] = useState('subeditor');
   const [loading, setLoading] = useState(true);
+  const [activeTabId, setActiveTabId] = useState<number | null>(null);
   const [issuesState, setIssuesState] = useState<PopupIssuesState>(EMPTY_ISSUES_STATE);
   const [selectedByField, setSelectedByField] = useState<Record<string, string[]>>({});
   const [issuesError, setIssuesError] = useState<string | null>(null);
@@ -76,7 +77,37 @@ function Popup() {
       setLoading(false);
     });
 
-    loadPageIssues(setIssuesState, setIssuesError);
+    loadPageIssues(setIssuesState, setIssuesError, setActiveTabId);
+  }, []);
+
+  useEffect(() => {
+    const handleMessage = (
+      message: { type?: string; tabId?: number; state?: PopupIssuesState },
+    ) => {
+      if (message?.type !== 'TAB_ISSUES_UPDATED') return;
+      if (activeTabId === null || message.tabId !== activeTabId) return;
+      setIssuesState(message.state ?? EMPTY_ISSUES_STATE);
+      setIssuesError(null);
+    };
+
+    chrome.runtime.onMessage.addListener(handleMessage);
+    return () => {
+      chrome.runtime.onMessage.removeListener(handleMessage);
+    };
+  }, [activeTabId]);
+
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState !== 'visible') return;
+      loadPageIssues(setIssuesState, setIssuesError, setActiveTabId);
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('focus', handleVisibilityChange);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('focus', handleVisibilityChange);
+    };
   }, []);
 
   useEffect(() => {
@@ -121,7 +152,7 @@ function Popup() {
   };
 
   const refreshIssues = () => {
-    loadPageIssues(setIssuesState, setIssuesError);
+    loadPageIssues(setIssuesState, setIssuesError, setActiveTabId);
   };
 
   const toggleIssueSelection = (issueKey: string, checked: boolean) => {
@@ -213,7 +244,7 @@ function Popup() {
       </div>
 
       <div style={styles.helper}>
-        Review the current page’s issues here. Inline highlights stay on the page; the full issue list lives in this popup.
+        Review the current page’s issues here. Inline highlights and version history stay on the page; this popup mirrors the issue list.
       </div>
 
       <div style={styles.section}>
@@ -334,8 +365,10 @@ function Popup() {
 function loadPageIssues(
   setIssuesState: (state: PopupIssuesState) => void,
   setIssuesError: (error: string | null) => void,
+  setActiveTabId?: (tabId: number | null) => void,
 ) {
   withActiveTab((tabId) => {
+    setActiveTabId?.(tabId);
     chrome.runtime.sendMessage({ type: 'GET_TAB_ISSUES', tabId }, (resp) => {
       if (chrome.runtime.lastError) {
         setIssuesState(EMPTY_ISSUES_STATE);
@@ -347,6 +380,7 @@ function loadPageIssues(
       setIssuesError(null);
     });
   }, () => {
+    setActiveTabId?.(null);
     setIssuesState(EMPTY_ISSUES_STATE);
     setIssuesError('Could not find the active tab.');
   });
@@ -372,6 +406,7 @@ const styles: Record<string, Record<string, string | number>> = {
   container: {
     width: '320px',
     maxHeight: '580px',
+    overflowY: 'auto',
     padding: '16px',
     fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
     color: COLORS.text,
@@ -513,11 +548,8 @@ const styles: Record<string, Record<string, string | number>> = {
     display: 'flex',
     flexDirection: 'column',
     gap: '8px',
-    maxHeight: '260px',
-    overflowY: 'auto',
     marginTop: '10px',
     marginBottom: '10px',
-    paddingRight: '4px',
   },
   issueRow: {
     display: 'flex',
