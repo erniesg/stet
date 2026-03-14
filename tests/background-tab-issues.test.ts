@@ -77,13 +77,15 @@ function setupChromeMock(backing: StorageBacking) {
     sendMessage: vi.fn(),
   };
 
+  const action = {
+    setBadgeText: vi.fn(),
+    setBadgeBackgroundColor: vi.fn(),
+  };
+
   (globalThis as typeof globalThis & { chrome: unknown }).chrome = {
     runtime,
     tabs,
-    action: {
-      setBadgeText: vi.fn(),
-      setBadgeBackgroundColor: vi.fn(),
-    },
+    action,
     storage: {
       sync: createStorageArea(backing.sync),
       local: createStorageArea(backing.local),
@@ -91,7 +93,7 @@ function setupChromeMock(backing: StorageBacking) {
     },
   };
 
-  return { runtimeListeners, runtime, tabs };
+  return { runtimeListeners, runtime, tabs, action };
 }
 
 async function dispatchRuntimeMessage(
@@ -164,6 +166,7 @@ describe('background tab issue sync', () => {
 
     const secondChrome = setupChromeMock(backing);
     await import('../packages/extension/src/background/service-worker.js');
+    await new Promise((resolve) => setTimeout(resolve, 0));
     const secondListener = secondChrome.runtimeListeners.at(-1);
     expect(secondListener).toBeTruthy();
 
@@ -185,6 +188,8 @@ describe('background tab issue sync', () => {
     expect(state.activeFieldKey).toBe('field-1');
     expect(state.activeLabel).toBe('Body');
     expect(state.issues[0]?.rule).toBe('SPELL');
+    expect(secondChrome.action.setBadgeText).toHaveBeenCalledWith({ text: '2', tabId: 17 });
+    expect(secondChrome.action.setBadgeBackgroundColor).toHaveBeenCalledWith({ color: '#e74c3c', tabId: 17 });
   });
 
   it('refreshes the persisted active frame so popup state follows on-page fixes', async () => {

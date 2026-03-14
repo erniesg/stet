@@ -153,6 +153,23 @@ function serializeFrameStates(states: Map<number, FrameIssueState>): Record<stri
   return serialized;
 }
 
+function parseStoredFrameStates(rawStates: unknown): Map<number, FrameIssueState> {
+  const hydrated = new Map<number, FrameIssueState>();
+
+  if (typeof rawStates !== 'object' || rawStates === null) {
+    return hydrated;
+  }
+
+  for (const [frameId, state] of Object.entries(rawStates as Record<string, unknown>)) {
+    const normalized = normalizeFrameIssueState(state);
+    const parsedFrameId = Number(frameId);
+    if (!normalized || !Number.isInteger(parsedFrameId)) continue;
+    hydrated.set(parsedFrameId, normalized);
+  }
+
+  return hydrated;
+}
+
 async function persistTabIssueState(tabId: number): Promise<void> {
   const states = tabIssueStates.get(tabId);
   const storage = getIssueStateStorageArea();
@@ -183,17 +200,7 @@ async function loadPersistedTabIssueState(tabId: number): Promise<Map<number, Fr
     storage.get(storageKey, (result) => resolve(result));
   });
 
-  const rawStates = stored[storageKey];
-  const hydrated = new Map<number, FrameIssueState>();
-
-  if (typeof rawStates === 'object' && rawStates !== null) {
-    for (const [frameId, state] of Object.entries(rawStates as Record<string, unknown>)) {
-      const normalized = normalizeFrameIssueState(state);
-      const parsedFrameId = Number(frameId);
-      if (!normalized || !Number.isInteger(parsedFrameId)) continue;
-      hydrated.set(parsedFrameId, normalized);
-    }
-  }
+  const hydrated = parseStoredFrameStates(stored[storageKey]);
 
   if (hydrated.size > 0) {
     tabIssueStates.set(tabId, hydrated);
@@ -201,6 +208,28 @@ async function loadPersistedTabIssueState(tabId: number): Promise<Map<number, Fr
   }
 
   return getFrameStates(tabId);
+}
+
+async function restorePersistedBadges(): Promise<void> {
+  const storage = getIssueStateStorageArea();
+  const stored = await new Promise<Record<string, unknown>>((resolve) => {
+    storage.get(null, (result) => resolve(result));
+  });
+
+  for (const [storageKey, rawStates] of Object.entries(stored)) {
+    if (!storageKey.startsWith(TAB_ISSUE_STORAGE_PREFIX)) continue;
+
+    const tabId = Number(storageKey.slice(TAB_ISSUE_STORAGE_PREFIX.length));
+    if (!Number.isInteger(tabId)) continue;
+
+    const hydrated = parseStoredFrameStates(rawStates);
+    if (hydrated.size === 0) {
+      continue;
+    }
+
+    tabIssueStates.set(tabId, hydrated);
+    setBadgeForTab(tabId, getTabIssueState(tabId).totalIssues);
+  }
 }
 
 function pickPreferredFrame(states: Map<number, FrameIssueState>): [number, FrameIssueState] | null {
@@ -451,6 +480,8 @@ chrome.runtime.onInstalled.addListener(async () => {
     await saveSettings(DEFAULT_STORED_SETTINGS);
   }
 });
+
+void restorePersistedBadges();
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   switch (message.type) {
