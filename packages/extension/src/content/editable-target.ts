@@ -35,6 +35,24 @@ export interface EditableTarget {
 export const CONTENTEDITABLE_SELECTOR = '[contenteditable]';
 const HISTORY_STORAGE_PREFIX = 'stet:history:';
 
+interface HostEditableAdapter {
+  read(): string;
+  write(text: string): void;
+  supportsRangeReplace: boolean;
+}
+
+interface BTEditorHostApi {
+  contentEl?: HTMLElement | null;
+  getText?: () => string;
+  setText?: (text: string) => void;
+}
+
+declare global {
+  interface Window {
+    btEditor?: BTEditorHostApi;
+  }
+}
+
 export function isAnnotatableEditable(element: HTMLElement): boolean {
   return isTopLevelContentEditable(element);
 }
@@ -125,8 +143,8 @@ export function getEditableTarget(element: HTMLElement): EditableTarget | null {
       source: identity.source,
       signals: identity.signals,
     },
-    read: () => extractText(element),
-    write: (text: string) => replaceEditableText(element, text),
+    read: () => getHostEditableAdapter(element)?.read() ?? extractText(element),
+    write: (text: string) => getHostEditableAdapter(element)?.write(text) ?? replaceEditableText(element, text),
   };
 }
 
@@ -150,6 +168,12 @@ export function deriveEditableIdentity(seed: EditableIdentitySeed): EditableHist
 }
 
 export function replaceEditableText(element: HTMLElement, text: string): void {
+  const hostAdapter = getHostEditableAdapter(element);
+  if (hostAdapter) {
+    hostAdapter.write(text);
+    return;
+  }
+
   const doc = element.ownerDocument;
 
   if (element instanceof HTMLTextAreaElement || element instanceof HTMLInputElement) {
@@ -198,6 +222,9 @@ export function replaceEditableRange(
   end: number,
   replacement: string,
 ): boolean {
+  const hostAdapter = getHostEditableAdapter(element);
+  if (hostAdapter && !hostAdapter.supportsRangeReplace) return false;
+
   if (element instanceof HTMLTextAreaElement || element instanceof HTMLInputElement) {
     const current = element.value;
     const next = `${current.slice(0, start)}${replacement}${current.slice(end)}`;
@@ -294,6 +321,22 @@ function dispatchEditableEvents(element: HTMLElement) {
   }
 
   element.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
+function getHostEditableAdapter(element: HTMLElement): HostEditableAdapter | null {
+  const btEditor = window.btEditor;
+  if (!btEditor || typeof btEditor !== 'object') return null;
+  if (btEditor.contentEl !== element) return null;
+  if (typeof btEditor.getText !== 'function' || typeof btEditor.setText !== 'function') return null;
+
+  return {
+    read: () => btEditor.getText!(),
+    write: (text: string) => {
+      btEditor.setText!(text);
+      dispatchEditableEvents(element);
+    },
+    supportsRangeReplace: false,
+  };
 }
 
 function toHistoryElement(start: EventTarget | null): HTMLElement | null {

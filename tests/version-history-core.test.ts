@@ -6,7 +6,7 @@ import {
   shouldSaveSnapshot,
   summarizeChange,
 } from '../packages/extension/src/content/version-history-core.js';
-import { diffText } from '../packages/extension/src/content/version-history-diff.js';
+import { diffLines, diffText } from '../packages/extension/src/content/version-history-diff.js';
 
 describe('version history retention', () => {
   it('summarizes changed spans without full diffing', () => {
@@ -55,5 +55,20 @@ describe('version history diff preview', () => {
     expect(diff.removedChars).toBeGreaterThan(0);
     expect(diff.chunks.some((chunk) => chunk.type === 'insert')).toBe(true);
     expect(diff.chunks.some((chunk) => chunk.type === 'delete')).toBe(true);
+  });
+
+  it('returns git-style line rows for multi-line diffs', () => {
+    const lines = diffLines(
+      'alpha\nbeta\ngamma',
+      'alpha\nbeta revised\ngamma\ndelta',
+    );
+
+    expect(lines).toEqual([
+      { type: 'equal', value: 'alpha' },
+      { type: 'delete', value: 'beta' },
+      { type: 'insert', value: 'beta revised' },
+      { type: 'equal', value: 'gamma' },
+      { type: 'insert', value: 'delta' },
+    ]);
   });
 });

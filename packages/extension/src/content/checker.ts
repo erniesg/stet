@@ -420,6 +420,7 @@ async function applySelectedFixes(element: HTMLElement, selectedIssueKeys: strin
   const startedAt = getNow();
   const issues = latestIssues.get(element) ?? [];
   if (issues.length === 0) return 0;
+  const target = getEditableTarget(element);
 
   let text = extractText(element);
   let applied = 0;
@@ -454,7 +455,11 @@ async function applySelectedFixes(element: HTMLElement, selectedIssueKeys: strin
 
   if (applied > 0) {
     if (usedFullReplacement) {
-      replaceEditableText(element, text);
+      if (target) {
+        target.write(text);
+      } else {
+        replaceEditableText(element, text);
+      }
     } else {
       notifyEditableChanged(element);
     }
@@ -557,8 +562,8 @@ async function restoreEditorSnapshot(
   }
 
   const startedAt = getNow();
-  replaceEditableText(element, snapshot.content);
-  const currentText = extractText(element);
+  target.write(snapshot.content);
+  const currentText = target.read();
   const verification = verifyRestoredContent(snapshot.content, currentText);
   logHistoryEvent('history:restore', {
     ...getHistoryTargetLogData(target),

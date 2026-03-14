@@ -1,6 +1,6 @@
 import { render } from 'preact';
 import { useEffect, useState } from 'preact/hooks';
-import { diffText, type DiffChunk } from '../content/version-history-diff.js';
+import { diffLines, diffText, type DiffLine } from '../content/version-history-diff.js';
 import type { EditableHistoryRecord, VersionSnapshot } from '../content/version-history-core.js';
 
 const COLORS = {
@@ -88,6 +88,9 @@ function Popup() {
   const selectedSnapshot = historySnapshots.find((snapshot) => snapshot.id === selectedSnapshotId) ?? null;
   const historyDiff = selectedSnapshot && historyLiveEditorAvailable
     ? diffText(historyCurrentText, selectedSnapshot.content)
+    : null;
+  const historyLineDiff = selectedSnapshot && historyLiveEditorAvailable
+    ? diffLines(historyCurrentText, selectedSnapshot.content)
     : null;
 
   useEffect(() => {
@@ -221,11 +224,13 @@ function Popup() {
 
     setApplying(true);
     withActiveTab((tabId) => {
+      const frameId = issuesState.activeFrameId!;
+      const fieldKey = issuesState.activeFieldKey!;
       chrome.runtime.sendMessage({
         type: 'APPLY_TAB_ISSUES',
         tabId,
-        frameId: issuesState.activeFrameId,
-        fieldKey: issuesState.activeFieldKey,
+        frameId,
+        fieldKey,
         issueKeys: selectedKeys,
       }, (resp) => {
         setApplying(false);
@@ -238,10 +243,11 @@ function Popup() {
         if (resp?.state) {
           setIssuesState(resp.state as PopupIssuesState);
           setIssuesError(null);
-          return;
         }
-
-        refreshIssues();
+        window.setTimeout(() => {
+          loadPageIssues(setIssuesState, setIssuesError, setActiveTabId);
+          void refreshHistory(tabId, frameId, fieldKey);
+        }, 120);
       });
     }, () => {
       setApplying(false);
@@ -561,7 +567,10 @@ function Popup() {
                   <button
                     key={snapshot.id}
                     type="button"
-                    onClick={() => setSelectedSnapshotId(snapshot.id)}
+                    onClick={(event) => {
+                      setSelectedSnapshotId(snapshot.id);
+                      event.currentTarget.blur();
+                    }}
                     style={{
                       ...styles.historyRow,
                       ...(selected ? styles.historyRowSelected : {}),
@@ -582,14 +591,14 @@ function Popup() {
                   ? historyLiveEditorAvailable && historyDiff
                     ? historyDiff.addedChars === 0 && historyDiff.removedChars === 0
                       ? 'Selected version matches the current editor text.'
-                      : `Restoring this version adds ${historyDiff.addedChars.toLocaleString()} chars and removes ${historyDiff.removedChars.toLocaleString()} chars.`
+                      : `+${historyDiff.addedChars.toLocaleString()} / -${historyDiff.removedChars.toLocaleString()} chars if restored.`
                     : 'Live editor unavailable. Re-focus the field on the page to compare or restore.'
                   : 'Pick a saved version to inspect it.'}
               </div>
               <div style={styles.historyDiffBox}>
                 {selectedSnapshot
-                  ? historyLiveEditorAvailable && historyDiff
-                    ? renderDiffPreview(historyDiff.chunks)
+                  ? historyLiveEditorAvailable && historyLineDiff
+                    ? renderGitDiffPreview(historyLineDiff)
                     : <pre style={styles.historySnapshotText}>{selectedSnapshot.content}</pre>
                   : <span style={styles.emptyState}>No diff preview available.</span>}
               </div>
@@ -706,19 +715,25 @@ function formatAbsoluteDate(dateString: string): string {
   }).format(new Date(dateString));
 }
 
-function renderDiffPreview(chunks: DiffChunk[]) {
-  if (chunks.length === 0) {
+function renderGitDiffPreview(lines: DiffLine[]) {
+  if (lines.length === 0) {
     return <span style={styles.emptyState}>No textual differences.</span>;
   }
 
-  return chunks.map((chunk, index) => {
-    if (chunk.type === 'insert') {
-      return <ins key={index} style={styles.diffInsert}>{chunk.value}</ins>;
-    }
-    if (chunk.type === 'delete') {
-      return <del key={index} style={styles.diffDelete}>{chunk.value}</del>;
-    }
-    return <span key={index}>{chunk.value}</span>;
+  return lines.map((line, index) => {
+    const marker = line.type === 'insert' ? '+' : line.type === 'delete' ? '-' : ' ';
+    const rowStyle = line.type === 'insert'
+      ? styles.diffRowInsert
+      : line.type === 'delete'
+        ? styles.diffRowDelete
+        : styles.diffRowEqual;
+
+    return (
+      <div key={`${line.type}:${index}:${line.value.slice(0, 24)}`} style={{ ...styles.diffRow, ...rowStyle }}>
+        <span style={styles.diffMarker}>{marker}</span>
+        <span style={styles.diffLineText}>{line.value || ' '}</span>
+      </div>
+    );
   });
 }
 
@@ -903,16 +918,19 @@ const styles: Record<string, Record<string, string | number>> = {
     display: 'flex',
     flexDirection: 'column',
     gap: '4px',
+    appearance: 'none',
     border: `1px solid ${COLORS.border}`,
     borderRadius: '8px',
     padding: '10px',
     background: '#fff',
     textAlign: 'left',
     cursor: 'pointer',
+    boxShadow: 'none',
   },
   historyRowSelected: {
     borderColor: COLORS.primary,
     background: '#eef2ff',
+    boxShadow: `0 0 0 1px ${COLORS.primary} inset`,
   },
   historyRowTitle: {
     fontSize: '12px',
@@ -935,12 +953,10 @@ const styles: Record<string, Record<string, string | number>> = {
   historyDiffBox: {
     border: `1px solid ${COLORS.border}`,
     borderRadius: '8px',
-    padding: '10px',
+    padding: '8px',
     background: COLORS.lightBg,
     fontSize: '12px',
     lineHeight: '1.5',
-    whiteSpace: 'pre-wrap',
-    wordBreak: 'break-word',
     maxHeight: '180px',
     overflowY: 'auto',
   },
@@ -950,15 +966,33 @@ const styles: Record<string, Record<string, string | number>> = {
     wordBreak: 'break-word',
     fontFamily: 'inherit',
   },
-  diffInsert: {
-    background: 'rgba(34, 197, 94, 0.18)',
-    color: '#166534',
-    textDecoration: 'none',
+  diffRow: {
+    display: 'grid',
+    gridTemplateColumns: '14px minmax(0, 1fr)',
+    gap: '8px',
+    padding: '2px 6px',
+    borderRadius: '4px',
+    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+    whiteSpace: 'pre-wrap',
+    wordBreak: 'break-word',
   },
-  diffDelete: {
-    background: 'rgba(239, 68, 68, 0.18)',
+  diffRowEqual: {
+    color: '#475569',
+  },
+  diffRowInsert: {
+    color: '#166534',
+    background: 'rgba(34, 197, 94, 0.14)',
+  },
+  diffRowDelete: {
     color: '#991b1b',
-    textDecoration: 'line-through',
+    background: 'rgba(239, 68, 68, 0.14)',
+  },
+  diffMarker: {
+    fontWeight: '700',
+    textAlign: 'center',
+  },
+  diffLineText: {
+    minWidth: 0,
   },
   issueRow: {
     display: 'flex',

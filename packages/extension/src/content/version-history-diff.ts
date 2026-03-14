@@ -11,6 +11,11 @@ export interface DiffResult {
   removedChars: number;
 }
 
+export interface DiffLine {
+  type: DiffChunkType;
+  value: string;
+}
+
 const MAX_DYNAMIC_PROGRAMMING_CELLS = 40_000;
 const MAX_DYNAMIC_PROGRAMMING_TOKENS = 220;
 
@@ -62,8 +67,72 @@ export function diffText(currentText: string, targetText: string): DiffResult {
   return { chunks, addedChars, removedChars };
 }
 
+export function diffLines(currentText: string, targetText: string): DiffLine[] {
+  const currentLines = splitLines(currentText);
+  const targetLines = splitLines(targetText);
+
+  if (currentLines.length === 0 && targetLines.length === 0) return [];
+
+  if (!canUseLineDynamicProgramming(currentLines, targetLines)) {
+    return [
+      ...currentLines.map((value) => ({ type: 'delete' as const, value })),
+      ...targetLines.map((value) => ({ type: 'insert' as const, value })),
+    ];
+  }
+
+  const rows = currentLines.length + 1;
+  const cols = targetLines.length + 1;
+  const table = Array.from({ length: rows }, () => Array<number>(cols).fill(0));
+
+  for (let row = 1; row < rows; row += 1) {
+    for (let col = 1; col < cols; col += 1) {
+      if (currentLines[row - 1] === targetLines[col - 1]) {
+        table[row][col] = table[row - 1][col - 1] + 1;
+      } else {
+        table[row][col] = Math.max(table[row - 1][col], table[row][col - 1]);
+      }
+    }
+  }
+
+  const reversed: DiffLine[] = [];
+  let row = currentLines.length;
+  let col = targetLines.length;
+
+  while (row > 0 || col > 0) {
+    if (row > 0 && col > 0 && currentLines[row - 1] === targetLines[col - 1]) {
+      reversed.push({ type: 'equal', value: currentLines[row - 1] });
+      row -= 1;
+      col -= 1;
+      continue;
+    }
+
+    if (col > 0 && (row === 0 || table[row][col - 1] >= table[row - 1][col])) {
+      reversed.push({ type: 'insert', value: targetLines[col - 1] });
+      col -= 1;
+      continue;
+    }
+
+    if (row > 0) {
+      reversed.push({ type: 'delete', value: currentLines[row - 1] });
+      row -= 1;
+    }
+  }
+
+  return reversed.reverse();
+}
+
 function tokenize(text: string): string[] {
   return text.match(/\s+|[^\s]+/g) ?? [];
+}
+
+function splitLines(text: string): string[] {
+  const normalized = text.replace(/\r\n/g, '\n');
+  if (normalized.length === 0) return [];
+  const lines = normalized.split('\n');
+  if (lines.length > 1 && lines.at(-1) === '') {
+    lines.pop();
+  }
+  return lines;
 }
 
 function canUseDynamicProgramming(left: string[], right: string[]): boolean {
@@ -71,6 +140,11 @@ function canUseDynamicProgramming(left: string[], right: string[]): boolean {
   if (left.length > MAX_DYNAMIC_PROGRAMMING_TOKENS || right.length > MAX_DYNAMIC_PROGRAMMING_TOKENS) {
     return false;
   }
+  return left.length * right.length <= MAX_DYNAMIC_PROGRAMMING_CELLS;
+}
+
+function canUseLineDynamicProgramming(left: string[], right: string[]): boolean {
+  if (left.length === 0 || right.length === 0) return true;
   return left.length * right.length <= MAX_DYNAMIC_PROGRAMMING_CELLS;
 }
 

@@ -3,7 +3,7 @@ import {
   getEditableTarget,
   type EditableTarget,
 } from './editable-target.js';
-import { diffText } from './version-history-diff.js';
+import { diffLines, diffText } from './version-history-diff.js';
 import {
   DEFAULT_HISTORY_POLICY,
   type EditableHistoryRecord,
@@ -402,6 +402,7 @@ export class VersionHistoryManager {
         const snapshotId = trigger?.dataset.snapshotId;
         if (!snapshotId) return;
         this.selectedSnapshotId = snapshotId;
+        trigger.blur();
         this.renderPanel();
       });
     });
@@ -650,13 +651,14 @@ export class VersionHistoryManager {
 
     const currentText = session.target.read();
     const diff = diffText(currentText, selected.content);
+    const lineDiff = diffLines(currentText, selected.content);
     const unchanged = diff.addedChars === 0 && diff.removedChars === 0;
 
     this.previewSummary.textContent = unchanged
       ? 'Selected version matches the current draft.'
-      : `Restoring this version will add ${diff.addedChars.toLocaleString()} chars and remove ${diff.removedChars.toLocaleString()} chars.`;
+      : `+${diff.addedChars.toLocaleString()} / -${diff.removedChars.toLocaleString()} chars if restored.`;
 
-    this.previewDiff.replaceChildren(renderDiffNodes(diff.chunks));
+    this.previewDiff.replaceChildren(renderDiffLines(lineDiff));
     this.restoreButton.disabled = unchanged;
     this.updateFloatingPosition('render-panel');
   }
@@ -1024,10 +1026,10 @@ function readHistoryUiModeOverride(): HistoryUiMode | undefined {
   return undefined;
 }
 
-function renderDiffNodes(chunks: ReturnType<typeof diffText>['chunks']): DocumentFragment {
+function renderDiffLines(lines: ReturnType<typeof diffLines>): DocumentFragment {
   const fragment = document.createDocumentFragment();
 
-  if (chunks.length === 0) {
+  if (lines.length === 0) {
     const note = document.createElement('p');
     note.className = 'stet-history-preview-note';
     note.textContent = 'No textual differences.';
@@ -1035,30 +1037,23 @@ function renderDiffNodes(chunks: ReturnType<typeof diffText>['chunks']): Documen
     return fragment;
   }
 
-  for (const chunk of chunks) {
-    const element = chunk.type === 'equal'
-      ? document.createElement('span')
-      : chunk.type === 'insert'
-        ? document.createElement('ins')
-        : document.createElement('del');
+  for (const line of lines) {
+    const row = document.createElement('div');
+    row.className = `stet-history-diff-line is-${line.type}`;
 
-    if (chunk.type === 'insert') element.className = 'stet-history-insert';
-    if (chunk.type === 'delete') element.className = 'stet-history-delete';
-    appendTextWithLineBreaks(element, chunk.value);
-    fragment.append(element);
+    const marker = document.createElement('span');
+    marker.className = 'stet-history-diff-marker';
+    marker.textContent = line.type === 'insert' ? '+' : line.type === 'delete' ? '-' : ' ';
+
+    const text = document.createElement('span');
+    text.className = 'stet-history-diff-text';
+    text.textContent = line.value || ' ';
+
+    row.append(marker, text);
+    fragment.append(row);
   }
 
   return fragment;
-}
-
-function appendTextWithLineBreaks(parent: HTMLElement, value: string) {
-  const parts = value.split('\n');
-  parts.forEach((part, index) => {
-    if (index > 0) parent.append(document.createElement('br'));
-    if (part.length > 0) {
-      parent.append(document.createTextNode(part));
-    }
-  });
 }
 
 function formatVersionLabel(snapshot: VersionSnapshot): string {
