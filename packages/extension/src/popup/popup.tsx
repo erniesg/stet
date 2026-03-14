@@ -46,6 +46,23 @@ interface PopupHistoryContextResponse {
   record: EditableHistoryRecord | null;
 }
 
+interface PopupHistoryTarget {
+  frameId: number;
+  fieldKey: string;
+  label: string;
+  descriptor: string;
+  kind: 'textarea' | 'contenteditable';
+  liveEditorAvailable: boolean;
+  snapshotCount: number;
+  updatedAt: string | null;
+  isActive: boolean;
+}
+
+interface PopupHistoryTargetsResponse {
+  activeFieldKey: string | null;
+  targets: PopupHistoryTarget[];
+}
+
 const EMPTY_ISSUES_STATE: PopupIssuesState = {
   enabled: false,
   totalIssues: 0,
@@ -54,6 +71,11 @@ const EMPTY_ISSUES_STATE: PopupIssuesState = {
   activeFieldKey: null,
   activeLabel: null,
   issues: [],
+};
+
+const EMPTY_HISTORY_TARGETS: PopupHistoryTargetsResponse = {
+  activeFieldKey: null,
+  targets: [],
 };
 
 function formatSuggestion(issue: PopupIssue): string {
@@ -72,6 +94,8 @@ function Popup() {
   const [selectedByField, setSelectedByField] = useState<Record<string, string[]>>({});
   const [issuesError, setIssuesError] = useState<string | null>(null);
   const [applying, setApplying] = useState(false);
+  const [historyTargets, setHistoryTargets] = useState<PopupHistoryTarget[]>([]);
+  const [selectedHistoryTargetKey, setSelectedHistoryTargetKey] = useState<string | null>(null);
   const [historySnapshots, setHistorySnapshots] = useState<VersionSnapshot[]>([]);
   const [historyCurrentText, setHistoryCurrentText] = useState('');
   const [historyLabel, setHistoryLabel] = useState<string | null>(null);
@@ -85,6 +109,8 @@ function Popup() {
   const selectedKeys = activeTargetKey ? (selectedByField[activeTargetKey] ?? []) : [];
   const fixableKeys = issuesState.issues.filter((issue) => issue.canFix).map((issue) => issue.key);
   const fixableCount = fixableKeys.length;
+  const selectedHistoryTarget = historyTargets.find((target) =>
+    getHistoryTargetKey(target) === selectedHistoryTargetKey) ?? null;
   const selectedSnapshot = historySnapshots.find((snapshot) => snapshot.id === selectedSnapshotId) ?? null;
   const historyDiff = selectedSnapshot && historyLiveEditorAvailable
     ? diffText(historyCurrentText, selectedSnapshot.content)
@@ -114,6 +140,7 @@ function Popup() {
       if (activeTabId === null || message.tabId !== activeTabId) return;
       setIssuesState(message.state ?? EMPTY_ISSUES_STATE);
       setIssuesError(null);
+      void refreshHistoryTargets(message.tabId, message.state ?? EMPTY_ISSUES_STATE);
     };
 
     chrome.runtime.onMessage.addListener(handleMessage);
@@ -123,7 +150,23 @@ function Popup() {
   }, [activeTabId]);
 
   useEffect(() => {
-    if (activeTabId === null || issuesState.activeFrameId === null || !issuesState.activeFieldKey) {
+    if (activeTabId === null) {
+      setHistoryTargets([]);
+      setSelectedHistoryTargetKey(null);
+      return;
+    }
+
+    void refreshHistoryTargets(activeTabId, issuesState);
+  }, [
+    activeTabId,
+    issuesState.activeFrameId,
+    issuesState.activeFieldKey,
+    issuesState.activeLabel,
+    issuesState.editorCount,
+  ]);
+
+  useEffect(() => {
+    if (activeTabId === null || !selectedHistoryTarget) {
       setHistorySnapshots([]);
       setHistoryCurrentText('');
       setHistoryLabel(null);
@@ -134,19 +177,22 @@ function Popup() {
       return;
     }
 
-    void refreshHistory(activeTabId, issuesState.activeFrameId, issuesState.activeFieldKey);
+    void refreshHistory(activeTabId, selectedHistoryTarget.frameId, selectedHistoryTarget.fieldKey);
   }, [
     activeTabId,
-    issuesState.activeFrameId,
-    issuesState.activeFieldKey,
-    issuesState.totalIssues,
-    issuesState.issues.map((issue) => issue.key).join('|'),
+    selectedHistoryTarget?.frameId,
+    selectedHistoryTarget?.fieldKey,
+    selectedHistoryTarget?.snapshotCount,
+    selectedHistoryTarget?.updatedAt,
   ]);
 
   useEffect(() => {
     const handleVisibilityChange = () => {
       if (document.visibilityState !== 'visible') return;
       loadPageIssues(setIssuesState, setIssuesError, setActiveTabId);
+      if (activeTabId !== null) {
+        void refreshHistoryTargets(activeTabId, issuesState);
+      }
     };
 
     document.addEventListener('visibilitychange', handleVisibilityChange);
@@ -155,7 +201,7 @@ function Popup() {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('focus', handleVisibilityChange);
     };
-  }, []);
+  }, [activeTabId, issuesState]);
 
   useEffect(() => {
     if (!activeTargetKey) return;
@@ -202,9 +248,10 @@ function Popup() {
     loadPageIssues(setIssuesState, setIssuesError, setActiveTabId);
   };
 
-  const refreshHistoryForActive = () => {
-    if (activeTabId === null || issuesState.activeFrameId === null || !issuesState.activeFieldKey) return;
-    void refreshHistory(activeTabId, issuesState.activeFrameId, issuesState.activeFieldKey);
+  const refreshHistoryForSelected = () => {
+    if (activeTabId === null || !selectedHistoryTarget) return;
+    void refreshHistoryTargets(activeTabId, issuesState);
+    void refreshHistory(activeTabId, selectedHistoryTarget.frameId, selectedHistoryTarget.fieldKey);
   };
 
   const toggleIssueSelection = (issueKey: string, checked: boolean) => {
@@ -258,16 +305,15 @@ function Popup() {
   const captureSnapshot = () => {
     if (
       activeTabId === null ||
-      issuesState.activeFrameId === null ||
-      !issuesState.activeFieldKey ||
+      !selectedHistoryTarget ||
       !historyLiveEditorAvailable ||
       historySnapshotting
     ) return;
 
     setHistorySnapshotting(true);
-    sendFrameMessage<PopupHistoryContextResponse>(activeTabId, issuesState.activeFrameId, {
+    sendFrameMessage<PopupHistoryContextResponse>(activeTabId, selectedHistoryTarget.frameId, {
       type: 'CAPTURE_EDITOR_SNAPSHOT',
-      fieldKey: issuesState.activeFieldKey,
+      fieldKey: selectedHistoryTarget.fieldKey,
     }).then((resp) => {
       setHistorySnapshotting(false);
       if (!resp?.ok) {
@@ -277,7 +323,8 @@ function Popup() {
 
       setHistoryCurrentText(resp.currentText);
       setHistoryError(null);
-      refreshHistoryForActive();
+      void refreshHistoryTargets(activeTabId, issuesState);
+      refreshHistoryForSelected();
     }).catch(() => {
       setHistorySnapshotting(false);
       setHistoryError('Could not save a snapshot for this editor.');
@@ -287,8 +334,7 @@ function Popup() {
   const restoreSnapshot = () => {
     if (
       activeTabId === null ||
-      issuesState.activeFrameId === null ||
-      !issuesState.activeFieldKey ||
+      !selectedHistoryTarget ||
       !historyLiveEditorAvailable ||
       !selectedSnapshot ||
       historyRestoring
@@ -303,9 +349,9 @@ function Popup() {
       currentText: string;
       state?: PopupIssuesState;
       error?: string;
-    }>(activeTabId, issuesState.activeFrameId, {
+    }>(activeTabId, selectedHistoryTarget.frameId, {
       type: 'RESTORE_EDITOR_SNAPSHOT',
-      fieldKey: issuesState.activeFieldKey,
+      fieldKey: selectedHistoryTarget.fieldKey,
       snapshotId: selectedSnapshot.id,
     }).then((resp) => {
       setHistoryRestoring(false);
@@ -317,12 +363,30 @@ function Popup() {
       setHistoryCurrentText(resp.currentText);
       if (resp.state) setIssuesState(resp.state);
       setHistoryError(null);
-      refreshHistoryForActive();
+      void refreshHistoryTargets(activeTabId, resp.state ?? issuesState);
+      refreshHistoryForSelected();
     }).catch(() => {
       setHistoryRestoring(false);
       setHistoryError('Could not restore this version.');
     });
   };
+
+  async function refreshHistoryTargets(tabId: number, pageIssuesState: PopupIssuesState) {
+    try {
+      const frameId = pageIssuesState.activeFrameId ?? 0;
+      const response = await sendFrameMessage<PopupHistoryTargetsResponse>(tabId, frameId, {
+        type: 'GET_PAGE_HISTORY_TARGETS',
+      });
+      const nextState = response ?? EMPTY_HISTORY_TARGETS;
+      const nextTargets = nextState.targets ?? [];
+
+      setHistoryTargets(nextTargets);
+      setSelectedHistoryTargetKey((current) => getPreferredHistoryTargetKey(current, nextTargets, pageIssuesState));
+    } catch {
+      setHistoryTargets([]);
+      setSelectedHistoryTargetKey(null);
+    }
+  }
 
   async function refreshHistory(tabId: number, frameId: number, fieldKey: string) {
     setHistoryLoading(true);
@@ -337,7 +401,7 @@ function Popup() {
       const snapshots = record?.snapshots ?? [];
       setHistorySnapshots(snapshots);
       setHistoryCurrentText(context?.currentText ?? '');
-      setHistoryLabel(context?.label ?? record?.label ?? issuesState.activeLabel ?? null);
+      setHistoryLabel(context?.label ?? record?.label ?? selectedHistoryTarget?.label ?? null);
       setHistoryLiveEditorAvailable(liveEditorAvailable);
       setSelectedSnapshotId((current) => getPreferredSnapshotId(
         current,
@@ -528,14 +592,14 @@ function Popup() {
         <div style={styles.configRow}>
           <span style={styles.sectionLabel}>Version History</span>
           <div style={styles.inlineActions}>
-            <button type="button" style={styles.linkButton} onClick={refreshHistoryForActive}>
+            <button type="button" style={styles.linkButton} onClick={refreshHistoryForSelected}>
               Refresh
             </button>
             <button
               type="button"
               style={styles.linkButton}
               onClick={captureSnapshot}
-              disabled={!issuesState.activeFieldKey || !historyLiveEditorAvailable || historySnapshotting}
+              disabled={!selectedHistoryTarget || !historyLiveEditorAvailable || historySnapshotting}
             >
               {historySnapshotting ? 'Saving...' : 'Snapshot now'}
             </button>
@@ -548,16 +612,45 @@ function Popup() {
 
         <div style={styles.issueMeta}>
           {historyLabel
-            ? `Current editor: ${historyLabel}`
-            : 'No editor detected on this page.'}
+            ? `Selected editor: ${historyLabel}`
+            : historyTargets.length > 0
+              ? 'Select an editor to inspect its local history.'
+              : 'No editor detected on this page.'}
         </div>
+
+        {historyTargets.length > 1 && (
+          <div style={styles.historyTargetList}>
+            {historyTargets.map((target) => {
+              const selected = getHistoryTargetKey(target) === selectedHistoryTargetKey;
+              return (
+                <button
+                  key={getHistoryTargetKey(target)}
+                  type="button"
+                  onClick={() => setSelectedHistoryTargetKey(getHistoryTargetKey(target))}
+                  style={{
+                    ...styles.historyTargetButton,
+                    ...(selected ? styles.historyTargetButtonSelected : {}),
+                  }}
+                >
+                  <span style={styles.historyTargetButtonLabel}>{target.label}</span>
+                  <span style={styles.historyTargetButtonMeta}>
+                    {target.snapshotCount} saved
+                    {target.isActive ? ' · active' : ''}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        )}
 
         {historyError && <div style={styles.errorText}>{historyError}</div>}
 
         {historyLoading ? (
           <div style={styles.emptyState}>Loading version history...</div>
+        ) : historyTargets.length === 0 ? (
+          <div style={styles.emptyState}>No live editors with version history support on this page.</div>
         ) : historySnapshots.length === 0 ? (
-          <div style={styles.emptyState}>No local versions saved for the current editor yet.</div>
+          <div style={styles.emptyState}>No local versions saved for the selected editor yet.</div>
         ) : (
           <>
             <div style={styles.historyList}>
@@ -742,6 +835,34 @@ function getActiveTargetKey(state: PopupIssuesState): string | null {
   return `${state.activeFrameId}:${state.activeFieldKey}`;
 }
 
+function getHistoryTargetKey(target: Pick<PopupHistoryTarget, 'frameId' | 'fieldKey'>): string {
+  return `${target.frameId}:${target.fieldKey}`;
+}
+
+function getPreferredHistoryTargetKey(
+  currentId: string | null,
+  targets: PopupHistoryTarget[],
+  issuesState: PopupIssuesState,
+): string | null {
+  if (targets.length === 0) return null;
+  if (currentId && targets.some((target) => getHistoryTargetKey(target) === currentId)) return currentId;
+
+  const issueTargetKey = issuesState.activeFrameId !== null && issuesState.activeFieldKey
+    ? `${issuesState.activeFrameId}:${issuesState.activeFieldKey}`
+    : null;
+  if (issueTargetKey && targets.some((target) => getHistoryTargetKey(target) === issueTargetKey)) {
+    return issueTargetKey;
+  }
+
+  const activeTarget = targets.find((target) => target.isActive);
+  if (activeTarget) return getHistoryTargetKey(activeTarget);
+
+  const withSnapshots = targets.find((target) => target.snapshotCount > 0);
+  if (withSnapshots) return getHistoryTargetKey(withSnapshots);
+
+  return getHistoryTargetKey(targets[0]);
+}
+
 function withActiveTab(onTab: (tabId: number) => void, onMissing?: () => void) {
   chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
     const tabId = tabs[0]?.id;
@@ -913,6 +1034,44 @@ const styles: Record<string, Record<string, string | number>> = {
     gap: '8px',
     marginTop: '10px',
     marginBottom: '10px',
+  },
+  historyTargetList: {
+    display: 'flex',
+    flexWrap: 'wrap',
+    gap: '8px',
+    marginTop: '10px',
+    marginBottom: '10px',
+  },
+  historyTargetButton: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '2px',
+    minWidth: '0',
+    flex: '1 1 120px',
+    appearance: 'none',
+    border: `1px solid ${COLORS.border}`,
+    borderRadius: '8px',
+    padding: '8px 10px',
+    background: '#fff',
+    textAlign: 'left',
+    cursor: 'pointer',
+  },
+  historyTargetButtonSelected: {
+    borderColor: COLORS.primary,
+    background: '#eef2ff',
+    boxShadow: `0 0 0 1px ${COLORS.primary} inset`,
+  },
+  historyTargetButtonLabel: {
+    fontSize: '12px',
+    fontWeight: '600',
+    color: COLORS.text,
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+  },
+  historyTargetButtonMeta: {
+    fontSize: '11px',
+    color: COLORS.gray,
   },
   historyRow: {
     display: 'flex',

@@ -78,6 +78,23 @@ interface PopupIssueState {
   issues: PopupIssueRecord[];
 }
 
+interface PopupHistoryTargetRecord {
+  frameId: number;
+  fieldKey: string;
+  label: string;
+  descriptor: string;
+  kind: 'textarea' | 'contenteditable';
+  liveEditorAvailable: boolean;
+  snapshotCount: number;
+  updatedAt: string | null;
+  isActive: boolean;
+}
+
+interface PopupHistoryTargetsState {
+  activeFieldKey: string | null;
+  targets: PopupHistoryTargetRecord[];
+}
+
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
@@ -550,6 +567,53 @@ async function getEditorHistoryState(fieldKey: string): Promise<{
   };
 }
 
+async function getPageHistoryTargets(): Promise<PopupHistoryTargetsState> {
+  pruneDisconnectedElements();
+
+  const activeHistoryElement = getTrackedHistoryElement();
+  const activeFieldKey = getEditableFieldKey(activeHistoryElement);
+  const seen = new Set<string>();
+  const targets: PopupHistoryTargetRecord[] = [];
+
+  for (const element of discoverHistoryEditables()) {
+    const target = getEditableTarget(element);
+    if (!target) continue;
+    if (seen.has(target.fieldKey)) continue;
+    seen.add(target.fieldKey);
+
+    const record = await loadHistoryRecordForTarget(target);
+    const updatedAt = record?.snapshots.at(-1)?.savedAt ?? record?.updatedAt ?? null;
+
+    targets.push({
+      frameId: 0,
+      fieldKey: target.fieldKey,
+      label: target.label,
+      descriptor: target.descriptor,
+      kind: target.kind,
+      liveEditorAvailable: true,
+      snapshotCount: record?.snapshots.length ?? 0,
+      updatedAt,
+      isActive: target.fieldKey === activeFieldKey,
+    });
+  }
+
+  return {
+    activeFieldKey,
+    targets: targets.sort((left, right) => {
+      const activeDelta = Number(right.isActive) - Number(left.isActive);
+      if (activeDelta !== 0) return activeDelta;
+
+      const snapshotDelta = right.snapshotCount - left.snapshotCount;
+      if (snapshotDelta !== 0) return snapshotDelta;
+
+      const updatedDelta = Date.parse(right.updatedAt ?? '') - Date.parse(left.updatedAt ?? '');
+      if (Number.isFinite(updatedDelta) && updatedDelta !== 0) return updatedDelta;
+
+      return left.label.localeCompare(right.label);
+    }),
+  };
+}
+
 async function captureEditorSnapshot(fieldKey: string): Promise<{
   ok: boolean;
   currentText: string;
@@ -693,6 +757,11 @@ function registerRuntimeHandlers() {
       if (message?.type === 'GET_EDITOR_HISTORY_STATE') {
         const fieldKey = typeof message.fieldKey === 'string' ? message.fieldKey : '';
         void getEditorHistoryState(fieldKey).then(sendResponse);
+        return true;
+      }
+
+      if (message?.type === 'GET_PAGE_HISTORY_TARGETS') {
+        void getPageHistoryTargets().then(sendResponse);
         return true;
       }
 
