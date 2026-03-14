@@ -41,7 +41,7 @@ interface HostEditableAdapter {
   supportsRangeReplace: boolean;
 }
 
-export type AnnotationSupportMode = 'inline' | 'panel';
+export type AnnotationSupportMode = 'inline' | 'overlay' | 'panel';
 
 export interface AnnotationSupport {
   mode: AnnotationSupportMode;
@@ -81,21 +81,21 @@ export function getAnnotationSupport(element: HTMLElement): AnnotationSupport {
 
   if (getHostEditableAdapter(element)) {
     return {
-      mode: 'panel',
+      mode: 'overlay',
       reason: 'host-adapter',
     };
   }
 
   if (hasHostManagedEditorMarker(element)) {
     return {
-      mode: 'panel',
+      mode: 'overlay',
       reason: 'host-managed-editor',
     };
   }
 
   return hasSafeInlineAnnotationMarkup(element)
     ? { mode: 'inline', reason: 'safe-rich-text-dom' }
-    : { mode: 'panel', reason: 'unsupported-rich-text-dom' };
+    : { mode: 'overlay', reason: 'safe-overlay-rich-text' };
 }
 
 export function supportsInlineAnnotationMarkup(element: HTMLElement): boolean {

@@ -45,7 +45,7 @@ describe('supportsInlineAnnotationMarkup', () => {
     });
   });
 
-  it('treats known host-managed rich-text roots as panel-only surfaces', () => {
+  it('treats known host-managed rich-text roots as safe overlay surfaces', () => {
     document.body.innerHTML = `
       <div id="editor" class="ProseMirror" contenteditable="true">
         <p>Hosted editor text</p>
@@ -55,7 +55,7 @@ describe('supportsInlineAnnotationMarkup', () => {
     const editor = document.getElementById('editor') as HTMLElement;
     expect(supportsInlineAnnotationMarkup(editor)).toBe(false);
     expect(getAnnotationSupport(editor)).toEqual({
-      mode: 'panel',
+      mode: 'overlay',
       reason: 'host-managed-editor',
     });
   });

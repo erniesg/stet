@@ -1,36 +1,80 @@
 /* stet annotation styles — LanguageTool-inspired */
 
-/* Underlines by category */
+stet-mark,
+.stet-overlay-mark {
+  --stet-annotation-color: #3182ce;
+  --stet-annotation-tint: rgba(49, 130, 206, 0.18);
+}
+
+/* Inline underlines by category */
 stet-mark {
-  text-decoration: underline;
-  text-decoration-style: solid;
+  text-decoration-line: underline;
+  text-decoration-style: wavy;
   text-decoration-thickness: 2px;
-  text-underline-offset: 2px;
+  text-underline-offset: 3px;
   text-decoration-skip-ink: none;
-  cursor: text;
+  cursor: pointer;
   position: relative;
-  border-radius: 1px;
-  transition: background 0.15s;
+  border-radius: 3px;
+  background: linear-gradient(to top, var(--stet-annotation-tint), transparent 60%);
+  transition: background 0.15s, outline-color 0.15s;
 }
 
 /* Category colors (LanguageTool convention) */
-stet-mark[data-severity="error"] {
-  text-decoration-color: #e53e3e;
-  background: rgba(229, 62, 62, 0.06);
+stet-mark[data-severity="error"],
+.stet-overlay-mark[data-severity="error"] {
+  --stet-annotation-color: #e11d48;
+  --stet-annotation-tint: rgba(225, 29, 72, 0.18);
+  text-decoration-color: var(--stet-annotation-color);
 }
 
-stet-mark[data-severity="warning"] {
-  text-decoration-color: #dd6b20;
-  background: rgba(221, 107, 32, 0.06);
+stet-mark[data-severity="warning"],
+.stet-overlay-mark[data-severity="warning"] {
+  --stet-annotation-color: #d97706;
+  --stet-annotation-tint: rgba(217, 119, 6, 0.18);
+  text-decoration-color: var(--stet-annotation-color);
 }
 
-stet-mark[data-severity="info"] {
-  text-decoration-color: #3182ce;
-  background: rgba(49, 130, 206, 0.06);
+stet-mark[data-severity="info"],
+.stet-overlay-mark[data-severity="info"] {
+  --stet-annotation-color: #2563eb;
+  --stet-annotation-tint: rgba(37, 99, 235, 0.2);
+  text-decoration-color: var(--stet-annotation-color);
 }
 
 stet-mark:hover {
-  background: rgba(49, 130, 206, 0.12);
+  background: linear-gradient(to top, var(--stet-annotation-tint), transparent 40%);
+}
+
+/* Safe-mode overlay marks for host-owned editors */
+.stet-overlay-root {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 0;
+  height: 0;
+  z-index: 2147483644;
+  pointer-events: none;
+}
+
+.stet-overlay-mark {
+  position: absolute;
+  padding: 0;
+  margin: 0;
+  border: none;
+  border-radius: 999px;
+  pointer-events: auto;
+  cursor: pointer;
+  background:
+    linear-gradient(to top, var(--stet-annotation-color), var(--stet-annotation-color)) left bottom / 100% 3px no-repeat,
+    linear-gradient(to top, var(--stet-annotation-tint), transparent 70%);
+  box-shadow: inset 0 -1px 0 rgba(255, 255, 255, 0.72);
+  transition: transform 0.12s ease, filter 0.12s ease;
+}
+
+.stet-overlay-mark:hover {
+  filter: saturate(1.1);
+  transform: translateY(-1px);
 }
 
 /* Popup card */

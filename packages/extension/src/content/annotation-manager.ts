@@ -22,6 +22,8 @@ interface AnnotationManagerOptions {
   onApplyIssue?: (issue: Issue) => void;
 }
 
+export type AnnotationRenderMode = 'inline' | 'overlay';
+
 function unwrapMark(mark: Element): void {
   const parent = mark.parentNode;
   if (!parent) return;
@@ -29,6 +31,15 @@ function unwrapMark(mark: Element): void {
   const text = document.createTextNode(mark.textContent || '');
   parent.replaceChild(text, mark);
   parent.normalize();
+}
+
+function disposeMark(mark: HTMLElement): void {
+  if (mark.tagName === TAG.toUpperCase()) {
+    unwrapMark(mark);
+    return;
+  }
+
+  mark.remove();
 }
 
 /** Close any open card */
@@ -52,7 +63,13 @@ document.addEventListener('click', (e) => {
 });
 
 /** Build and show the card popup for an issue */
-function showCard(mark: HTMLElement, issue: Issue, onApply: (issue: Issue) => void, onIgnore: () => void) {
+function showCard(
+  mark: HTMLElement,
+  issue: Issue,
+  onApply: (issue: Issue) => void,
+  onIgnore: () => void,
+  onIgnoreAll: () => void,
+) {
   closeCard();
 
   activeMark = mark;
@@ -129,15 +146,7 @@ function showCard(mark: HTMLElement, issue: Issue, onApply: (issue: Issue) => vo
   ignoreAllBtn.textContent = 'Ignore all';
   ignoreAllBtn.addEventListener('click', (e) => {
     e.stopPropagation();
-    // Remove all marks with the same fingerprint
-    const fp = mark.dataset.fingerprint;
-    if (fp) {
-      document.querySelectorAll(`${TAG}[data-fingerprint="${fp}"]`).forEach((el) => {
-        unwrapMark(el);
-      });
-    } else {
-      onIgnore();
-    }
+    onIgnoreAll();
     closeCard();
   });
   actions.appendChild(ignoreAllBtn);
@@ -161,12 +170,48 @@ function showCard(mark: HTMLElement, issue: Issue, onApply: (issue: Issue) => vo
 
 export class AnnotationManager {
   private element: HTMLElement;
-  private marks: HTMLElement[] = [];
+  private inlineMarks: HTMLElement[] = [];
+  private overlayMarks: HTMLElement[] = [];
+  private overlayRoot: HTMLElement | null = null;
   private onApplyIssue?: (issue: Issue) => void;
+  private lastIssues: Issue[] = [];
+  private lastMode: AnnotationRenderMode = 'inline';
+  private dismissedIssueKeys = new Set<string>();
+  private dismissedFingerprints = new Set<string>();
+  private overlayTracking = false;
+  private overlayRefreshFrame: number | null = null;
+
+  private readonly handleOverlayViewportChange = () => {
+    if (this.lastMode !== 'overlay') return;
+    if (this.lastIssues.length === 0) return;
+    if (!this.element.isConnected) {
+      this.clear();
+      return;
+    }
+    if (this.overlayRefreshFrame !== null) return;
+
+    this.overlayRefreshFrame = window.requestAnimationFrame(() => {
+      this.overlayRefreshFrame = null;
+      this.renderOverlayAnnotations(this.getVisibleIssues(this.lastIssues), false);
+    });
+  };
 
   constructor(element: HTMLElement, options: AnnotationManagerOptions = {}) {
     this.element = element;
     this.onApplyIssue = options.onApplyIssue;
+  }
+
+  destroy(): void {
+    this.clear();
+    this.stopOverlayTracking();
+    if (this.overlayRefreshFrame !== null) {
+      window.cancelAnimationFrame(this.overlayRefreshFrame);
+      this.overlayRefreshFrame = null;
+    }
+  }
+
+  getRenderedMarkCount(): number {
+    return this.inlineMarks.length + this.overlayMarks.length;
   }
 
   /**
@@ -176,7 +221,7 @@ export class AnnotationManager {
    * that innerText inserts for <br> and block elements.
    */
   private buildNodeMap(): { node: Text; start: number; end: number }[] {
-    const innerText = this.element.innerText || '';
+    const innerText = this.element.innerText || this.element.textContent || '';
     const entries: { node: Text; start: number; end: number }[] = [];
     const walker = document.createTreeWalker(this.element, NodeFilter.SHOW_TEXT);
 
@@ -307,29 +352,128 @@ export class AnnotationManager {
 
   clear(): void {
     closeCard();
-    for (const mark of this.marks) {
-      unwrapMark(mark);
+    this.clearInlineMarks();
+    this.clearOverlayMarks();
+    this.stopOverlayTracking();
+  }
+
+  private clearInlineMarks(): void {
+    for (const mark of this.inlineMarks) {
+      disposeMark(mark);
     }
-    this.marks = [];
+    this.inlineMarks = [];
+  }
+
+  private clearOverlayMarks(): void {
+    for (const mark of this.overlayMarks) {
+      disposeMark(mark);
+    }
+    this.overlayMarks = [];
+    if (this.overlayRoot) {
+      this.overlayRoot.remove();
+      this.overlayRoot = null;
+    }
   }
 
   private removeIssueMarks(issueId: string): void {
-    this.marks = this.marks.filter((mark) => {
+    this.inlineMarks = this.inlineMarks.filter((mark) => {
       if (mark.dataset.issueId !== issueId) return true;
-      unwrapMark(mark);
+      disposeMark(mark);
       return false;
+    });
+    this.overlayMarks = this.overlayMarks.filter((mark) => {
+      if (mark.dataset.issueId !== issueId) return true;
+      disposeMark(mark);
+      return false;
+    });
+    this.pruneOverlayRoot();
+  }
+
+  private removeFingerprintMarks(fingerprint: string): void {
+    this.inlineMarks = this.inlineMarks.filter((mark) => {
+      if (mark.dataset.fingerprint !== fingerprint) return true;
+      disposeMark(mark);
+      return false;
+    });
+    this.overlayMarks = this.overlayMarks.filter((mark) => {
+      if (mark.dataset.fingerprint !== fingerprint) return true;
+      disposeMark(mark);
+      return false;
+    });
+    this.pruneOverlayRoot();
+  }
+
+  private removeMark(mark: HTMLElement): void {
+    this.inlineMarks = this.inlineMarks.filter((entry) => {
+      if (entry !== mark) return true;
+      disposeMark(entry);
+      return false;
+    });
+    this.overlayMarks = this.overlayMarks.filter((entry) => {
+      if (entry !== mark) return true;
+      disposeMark(entry);
+      return false;
+    });
+    this.pruneOverlayRoot();
+  }
+
+  private pruneOverlayRoot(): void {
+    if (this.overlayMarks.length > 0) return;
+    if (this.overlayRoot) {
+      this.overlayRoot.remove();
+      this.overlayRoot = null;
+    }
+    this.stopOverlayTracking();
+  }
+
+  private dismissIssue(issue: Issue): void {
+    this.dismissedIssueKeys.add(getIssueKey(issue));
+    if (issue.fingerprint) {
+      this.dismissedFingerprints.add(issue.fingerprint);
+    }
+  }
+
+  private dismissIssueFamily(fingerprint: string): void {
+    this.dismissedFingerprints.add(fingerprint);
+    this.lastIssues
+      .filter((issue) => issue.fingerprint === fingerprint)
+      .forEach((issue) => {
+        this.dismissedIssueKeys.add(getIssueKey(issue));
+      });
+  }
+
+  private getVisibleIssues(issues: Issue[]): Issue[] {
+    return issues.filter((issue) => {
+      if (this.dismissedIssueKeys.has(getIssueKey(issue))) return false;
+      if (issue.fingerprint && this.dismissedFingerprints.has(issue.fingerprint)) return false;
+      return true;
     });
   }
 
-  annotate(issues: Issue[]): void {
+  annotate(issues: Issue[], mode: AnnotationRenderMode = 'inline'): void {
+    this.lastIssues = [...issues];
+    this.lastMode = mode;
+    this.dismissedIssueKeys.clear();
+    this.dismissedFingerprints.clear();
+
+    if (mode === 'overlay') {
+      this.renderOverlayAnnotations(issues, true);
+      return;
+    }
+
+    this.renderInlineAnnotations(issues);
+  }
+
+  private renderInlineAnnotations(issues: Issue[]): void {
     const startedAt = getNow();
     const selectionBefore = this.captureSelection(this.buildNodeMap());
-    const clearedMarks = this.marks.length;
+    const clearedMarks = this.getRenderedMarkCount();
     this.clear();
     if (issues.length === 0) {
       this.restoreSelection(selectionBefore, this.buildNodeMap());
       logHistoryEvent('checker:annotate', {
         ...getAnnotationElementLogData(this.element),
+        mode: 'inline',
         issueCount: 0,
         clearedMarks,
         appliedMarks: 0,
@@ -341,7 +485,7 @@ export class AnnotationManager {
     }
 
     const sorted = [...issues].sort((a, b) => b.offset - a.offset);
-    const fullText = this.element.innerText || '';
+    const fullText = this.element.innerText || this.element.textContent || '';
 
     // Build text node map aligned to innerText offsets.
     // innerText inserts \n for <br> and \n\n for block elements,
@@ -378,6 +522,7 @@ export class AnnotationManager {
           const mark = document.createElement(TAG);
           mark.dataset.rule = issue.rule;
           mark.dataset.severity = issue.severity;
+          mark.dataset.stetAnnotationMark = 'true';
           if (issue.issueId) mark.dataset.issueId = issue.issueId;
           if (issue.fingerprint) mark.dataset.fingerprint = issue.fingerprint;
 
@@ -389,10 +534,11 @@ export class AnnotationManager {
             showCard(mark, issue,
               // onApply
               (selectedIssue) => {
+                this.dismissIssue(selectedIssue);
                 if (issue.issueId) {
                   this.removeIssueMarks(issue.issueId);
                 } else {
-                  unwrapMark(mark);
+                  this.removeMark(mark);
                 }
 
                 if (this.onApplyIssue) {
@@ -402,18 +548,35 @@ export class AnnotationManager {
               },
               // onIgnore
               () => {
+                this.dismissIssue(issue);
                 if (issue.issueId) {
                   this.removeIssueMarks(issue.issueId);
                   return;
                 }
 
-                unwrapMark(mark);
+                this.removeMark(mark);
+              },
+              // onIgnoreAll
+              () => {
+                if (issue.fingerprint) {
+                  this.dismissIssueFamily(issue.fingerprint);
+                  this.removeFingerprintMarks(issue.fingerprint);
+                  return;
+                }
+
+                this.dismissIssue(issue);
+                if (issue.issueId) {
+                  this.removeIssueMarks(issue.issueId);
+                  return;
+                }
+
+                this.removeMark(mark);
               },
             );
           });
 
           range.surroundContents(mark);
-          this.marks.push(mark);
+          this.inlineMarks.push(mark);
         } catch {
           // surroundContents can fail on cross-boundary ranges
           surroundFailureCount += 1;
@@ -426,19 +589,201 @@ export class AnnotationManager {
     this.restoreSelection(selectionBefore, this.buildNodeMap());
     logHistoryEvent('checker:annotate', {
       ...getAnnotationElementLogData(this.element),
+      mode: 'inline',
       issueCount: issues.length,
       clearedMarks,
-      appliedMarks: this.marks.length,
+      appliedMarks: this.inlineMarks.length,
       skippedSelectionCount,
       surroundFailureCount,
       elapsedMs: getElapsedMs(startedAt),
     }, { level: surroundFailureCount > 0 ? 'warn' : 'debug' });
+  }
+
+  private renderOverlayAnnotations(issues: Issue[], logResult: boolean): void {
+    const startedAt = getNow();
+    const clearedMarks = this.getRenderedMarkCount();
+    this.clear();
+
+    if (issues.length === 0) {
+      if (logResult) {
+        logHistoryEvent('checker:annotate', {
+          ...getAnnotationElementLogData(this.element),
+          mode: 'overlay',
+          issueCount: 0,
+          clearedMarks,
+          appliedMarks: 0,
+          skippedSelectionCount: 0,
+          surroundFailureCount: 0,
+          elapsedMs: getElapsedMs(startedAt),
+        });
+      }
+      return;
+    }
+
+    const overlayRoot = this.ensureOverlayRoot();
+    const fullText = this.element.innerText || this.element.textContent || '';
+    const textNodes = this.buildNodeMap();
+    let unresolvedIssueCount = 0;
+    let rectFailureCount = 0;
+
+    for (const issue of issues) {
+      const resolvedRange = resolveIssueRange(fullText, issue);
+      if (!resolvedRange) {
+        unresolvedIssueCount += 1;
+        continue;
+      }
+
+      const start = this.resolveOffsetToDomPoint(resolvedRange.start, textNodes);
+      const end = this.resolveOffsetToDomPoint(resolvedRange.end, textNodes);
+      const range = document.createRange();
+
+      try {
+        range.setStart(start.node, start.offset);
+        range.setEnd(end.node, end.offset);
+      } catch {
+        rectFailureCount += 1;
+        continue;
+      }
+
+      const rects = Array.from(range.getClientRects())
+        .filter((rect) => rect.width > 0 && rect.height > 0);
+      if (rects.length === 0) {
+        rectFailureCount += 1;
+        continue;
+      }
+
+      for (const rect of rects) {
+        const mark = this.createOverlayMark(issue, rect);
+        overlayRoot.appendChild(mark);
+        this.overlayMarks.push(mark);
+      }
+    }
+
+    if (this.overlayMarks.length === 0) {
+      this.clearOverlayMarks();
+      this.stopOverlayTracking();
+    } else {
+      this.startOverlayTracking();
+    }
+
+    if (logResult) {
+      logHistoryEvent('checker:annotate', {
+        ...getAnnotationElementLogData(this.element),
+        mode: 'overlay',
+        issueCount: issues.length,
+        clearedMarks,
+        appliedMarks: this.overlayMarks.length,
+        skippedSelectionCount: 0,
+        surroundFailureCount: 0,
+        unresolvedIssueCount,
+        rectFailureCount,
+        elapsedMs: getElapsedMs(startedAt),
+      }, { level: rectFailureCount > 0 || unresolvedIssueCount > 0 ? 'warn' : 'debug' });
+    }
+  }
+
+  private ensureOverlayRoot(): HTMLElement {
+    if (this.overlayRoot?.isConnected) return this.overlayRoot;
+
+    const root = document.createElement('div');
+    root.className = 'stet-overlay-root';
+    root.setAttribute('aria-hidden', 'true');
+    (document.body ?? document.documentElement).appendChild(root);
+    this.overlayRoot = root;
+    return root;
+  }
+
+  private createOverlayMark(issue: Issue, rect: DOMRect | { left: number; top: number; width: number; height: number; bottom: number }): HTMLElement {
+    const mark = document.createElement('button');
+    mark.type = 'button';
+    mark.className = 'stet-overlay-mark';
+    mark.dataset.rule = issue.rule;
+    mark.dataset.severity = issue.severity;
+    mark.dataset.stetAnnotationMark = 'true';
+    if (issue.issueId) mark.dataset.issueId = issue.issueId;
+    if (issue.fingerprint) mark.dataset.fingerprint = issue.fingerprint;
+
+    const underlineHeight = Math.max(6, Math.min(12, Math.round(rect.height * 0.45)));
+    const left = Math.max(0, rect.left + window.scrollX);
+    const top = Math.max(0, rect.bottom + window.scrollY - underlineHeight);
+    const width = Math.max(8, rect.width);
+
+    mark.style.left = `${left}px`;
+    mark.style.top = `${top}px`;
+    mark.style.width = `${width}px`;
+    mark.style.height = `${underlineHeight}px`;
+
+    mark.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+
+      showCard(mark, issue,
+        (selectedIssue) => {
+          this.dismissIssue(selectedIssue);
+          if (issue.issueId) {
+            this.removeIssueMarks(issue.issueId);
+          } else {
+            this.removeMark(mark);
+          }
+
+          if (this.onApplyIssue) {
+            this.onApplyIssue(selectedIssue);
+          }
+        },
+        () => {
+          this.dismissIssue(issue);
+          if (issue.issueId) {
+            this.removeIssueMarks(issue.issueId);
+            return;
+          }
+
+          this.removeMark(mark);
+        },
+        () => {
+          if (issue.fingerprint) {
+            this.dismissIssueFamily(issue.fingerprint);
+            this.removeFingerprintMarks(issue.fingerprint);
+            return;
+          }
+
+          this.dismissIssue(issue);
+          if (issue.issueId) {
+            this.removeIssueMarks(issue.issueId);
+            return;
+          }
+
+          this.removeMark(mark);
+        },
+      );
+    });
+
+    return mark;
+  }
+
+  private startOverlayTracking(): void {
+    if (this.overlayTracking) return;
+    this.overlayTracking = true;
+    window.addEventListener('resize', this.handleOverlayViewportChange);
+    document.addEventListener('scroll', this.handleOverlayViewportChange, true);
+  }
+
+  private stopOverlayTracking(): void {
+    if (!this.overlayTracking) return;
+    this.overlayTracking = false;
+    window.removeEventListener('resize', this.handleOverlayViewportChange);
+    document.removeEventListener('scroll', this.handleOverlayViewportChange, true);
   }
 }
 
 function getAnnotationElementLogData(element: HTMLElement): Record<string, unknown> {
   return {
     descriptor: element.id ? `${element.tagName.toLowerCase()}#${element.id}` : element.tagName.toLowerCase(),
-    textLength: element.innerText.length,
+    textLength: (element.innerText || element.textContent || '').length,
   };
+}
+
+function getIssueKey(issue: Issue): string {
+  if (issue.issueId) return issue.issueId;
+  if (issue.fingerprint) return `fp:${issue.fingerprint}:${issue.offset}:${issue.length}`;
+  return `${issue.rule}:${issue.offset}:${issue.length}:${issue.originalText}`;
 }

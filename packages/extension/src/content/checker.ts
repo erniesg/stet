@@ -187,7 +187,9 @@ function runCheckAndAnnotate(element: HTMLElement) {
 
   const startedAt = getNow();
   const text = readEditableText(element);
-  const beforeMarks = element.isContentEditable ? element.querySelectorAll(CHECKER_MARK_SELECTOR).length : 0;
+  const mgr = getOrCreateManager(element);
+  const beforeMarks = mgr?.getRenderedMarkCount()
+    ?? (element.isContentEditable ? element.querySelectorAll(CHECKER_MARK_SELECTOR).length : 0);
 
   logHistoryEvent('checker:pre-check', {
     ...getCheckerElementLogData(element),
@@ -216,24 +218,24 @@ function runCheckAndAnnotate(element: HTMLElement) {
     console.log('[stet] No issues found');
   }
 
-  const mgr = getOrCreateManager(element);
   const annotationSupport = getAnnotationSupport(element);
-  const canInlineAnnotate = annotationSupport.mode === 'inline';
+  const canRenderAnnotations = annotationSupport.mode !== 'panel';
+  const annotationMode = annotationSupport.mode === 'inline' ? 'inline' : 'overlay';
 
   logHistoryEvent('checker:pre-annotate', {
     ...getCheckerElementLogData(element),
     issueCount: issues.length,
     beforeMarks,
-    canInlineAnnotate,
+    annotationMode: annotationSupport.mode,
   });
 
   selfMutating = true;
   try {
-    if (canInlineAnnotate && mgr) {
-      mgr.annotate(issues);
+    if (canRenderAnnotations && mgr) {
+      mgr.annotate(issues, annotationMode);
     } else {
       mgr?.clear();
-      logHistoryEvent('checker:inline-annotations-skip', {
+      logHistoryEvent('checker:annotations-skip', {
         ...getCheckerElementLogData(element),
         issueCount: issues.length,
         reason: annotationSupport.reason,
@@ -249,7 +251,8 @@ function runCheckAndAnnotate(element: HTMLElement) {
     textLength: text.length,
     issueCount: issues.length,
     beforeMarks,
-    afterMarks: element.isContentEditable ? element.querySelectorAll(CHECKER_MARK_SELECTOR).length : 0,
+    afterMarks: mgr?.getRenderedMarkCount()
+      ?? (element.isContentEditable ? element.querySelectorAll(CHECKER_MARK_SELECTOR).length : 0),
     elapsedMs: getElapsedMs(startedAt),
   });
   syncPageState();
@@ -270,6 +273,7 @@ function scheduleCheck(element: HTMLElement) {
 function pruneDisconnectedElements() {
   for (const element of trackedEditables) {
     if (element.isConnected) continue;
+    managers.get(element)?.destroy();
     managers.delete(element);
     trackedEditables.delete(element);
     latestIssues.delete(element);
