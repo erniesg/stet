@@ -8,6 +8,7 @@
  */
 
 import type { Issue } from 'stet';
+import { resolveIssueRange } from './issue-range.js';
 
 const TAG = 'stet-mark';
 
@@ -198,6 +199,7 @@ export class AnnotationManager {
     if (issues.length === 0) return;
 
     const sorted = [...issues].sort((a, b) => b.offset - a.offset);
+    const fullText = this.element.innerText || '';
 
     // Build text node map aligned to innerText offsets.
     // innerText inserts \n for <br> and \n\n for block elements,
@@ -206,8 +208,11 @@ export class AnnotationManager {
     const textNodes = this.buildNodeMap();
 
     for (const issue of sorted) {
-      const issueStart = issue.offset;
-      const issueEnd = issue.offset + issue.length;
+      const resolvedRange = resolveIssueRange(fullText, issue);
+      if (!resolvedRange) continue;
+
+      const issueStart = resolvedRange.start;
+      const issueEnd = resolvedRange.end;
 
       for (const tn of textNodes) {
         if (tn.end <= issueStart || tn.start >= issueEnd) continue;

@@ -33,3 +33,4 @@ export { countSyllables } from './nlp/syllable-counter.js';
 
 // Built-in packs (auto-register on import)
 export { commonPack } from './packs/common/index.js';
+export { loadCommonDictionary } from './packs/common/index.js';

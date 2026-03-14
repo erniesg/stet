@@ -4,6 +4,7 @@
  */
 
 import { commonPack } from 'stet';
+import { loadCommonDictionary } from 'stet';
 import { initChecker } from './checker.js';
 import { initVersionHistory } from './version-history-manager.js';
 
@@ -11,5 +12,5 @@ import { initVersionHistory } from './version-history-manager.js';
 void commonPack;
 
 // Start
-initChecker();
+initChecker(loadCommonDictionary);
 initVersionHistory();

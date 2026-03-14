@@ -102,6 +102,10 @@ function Popup() {
         </span>
       </div>
 
+      <div style={styles.helper}>
+        Focus an editor to open the on-page Issues and Version history drawers.
+      </div>
+
       {/* Role selector */}
       <div style={styles.section}>
         <span style={styles.sectionLabel}>Role</span>
@@ -217,6 +221,12 @@ const styles: Record<string, Record<string, string | number>> = {
     borderTop: `1px solid ${COLORS.border}`,
     paddingTop: '10px',
     marginBottom: '8px',
+  },
+  helper: {
+    fontSize: '12px',
+    lineHeight: '1.45',
+    color: COLORS.gray,
+    marginBottom: '10px',
   },
   sectionLabel: {
     fontSize: '12px',

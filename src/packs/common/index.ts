@@ -11,6 +11,8 @@ import { checkRepetitiveWords } from './rules/repetitive-words.js';
 import { checkFleschReadingEase } from './rules/flesch-reading-ease.js';
 import { checkSentenceReadability } from './rules/sentence-readability.js';
 import { checkRedundancies } from './rules/redundancies.js';
+import { checkCapitalization } from './rules/capitalization.js';
+import { checkSpelling, loadCommonDictionary } from './rules/spellcheck.js';
 
 export const commonPack: RulePack = {
   id: 'common',
@@ -101,8 +103,26 @@ export const commonPack: RulePack = {
       check: checkRedundancies,
       description: 'Flags redundant phrases like "free gift" or "past history".',
     },
+    {
+      id: 'COMMON-CAPS-01',
+      name: 'Sentence capitalization',
+      category: 'capitalization',
+      severity: 'warning',
+      check: checkCapitalization,
+      description: 'Flags lowercase sentence starts.',
+    },
+    {
+      id: 'COMMON-SPELL-01',
+      name: 'Spelling',
+      category: 'spelling',
+      severity: 'warning',
+      check: checkSpelling,
+      description: 'Flags words missing from the loaded dictionary.',
+    },
   ],
 };
 
 // Auto-register when imported
 registerPack(commonPack);
+
+export { loadCommonDictionary };

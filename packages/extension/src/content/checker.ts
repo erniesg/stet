@@ -16,12 +16,17 @@ import { loadDictionary, loadCustomTerms } from './dictionary-loader.js';
 import {
   discoverAnnotatableEditables,
   findAnnotatableEditable,
+  replaceEditableText,
 } from './editable-target.js';
+import { resolveIssueRange } from './issue-range.js';
+import { IssuePanelManager, getIssueSelectionKey } from './issue-panel.js';
 
 const managers = new Map<HTMLElement, AnnotationManager>();
+const latestIssues = new Map<HTMLElement, Issue[]>();
 let config: ResolvedStetConfig | null = null;
 const timers = new Map<HTMLElement, ReturnType<typeof setTimeout>>();
 let selfMutating = false;
+let issuePanel: IssuePanelManager | null = null;
 
 // ---------------------------------------------------------------------------
 // Config
@@ -137,6 +142,8 @@ function runCheckAndAnnotate(element: HTMLElement) {
   console.log(`[stet] Checking <${element.tagName.toLowerCase()}> (${text.length} chars)`);
 
   const issues = getIssues(element);
+  latestIssues.set(element, issues);
+  issuePanel?.updateIssues(element, issues);
 
   if (issues.length > 0) {
     console.log(`[stet] ${issues.length} issue(s):`);
@@ -187,6 +194,10 @@ function attachListener(el: HTMLElement) {
   el.addEventListener('input', () => {
     if (selfMutating) return;
     scheduleCheck(el);
+  });
+
+  el.addEventListener('focus', () => {
+    issuePanel?.setActiveElement(el);
   });
 
   setTimeout(() => runCheckAndAnnotate(el), 300);
@@ -271,8 +282,39 @@ export async function initChecker(onDictionaryLoaded?: OnDictionaryLoaded) {
     return `${id} (${p?.rules.length ?? 0} rules)`;
   }).join(', '));
 
+  issuePanel = new IssuePanelManager(async (element, selectedIssueKeys) => {
+    const issues = latestIssues.get(element) ?? [];
+    if (issues.length === 0) return 0;
+
+    let text = extractText(element);
+    let applied = 0;
+    let nextLockedStart = Number.POSITIVE_INFINITY;
+
+    const selected = issues
+      .filter((issue) => selectedIssueKeys.includes(getIssueSelectionKey(issue)))
+      .filter((issue) => issue.canFix && typeof issue.suggestion === 'string')
+      .sort((left, right) => right.offset - left.offset);
+
+    for (const issue of selected) {
+      const range = resolveIssueRange(text, issue);
+      if (!range) continue;
+      if (range.end > nextLockedStart) continue;
+
+      text = `${text.slice(0, range.start)}${issue.suggestion!}${text.slice(range.end)}`;
+      nextLockedStart = range.start;
+      applied += 1;
+    }
+
+    if (applied > 0) {
+      replaceEditableText(element, text);
+    }
+
+    return applied;
+  });
+
   discoverEditables();
   observeDOM();
+  issuePanel.setActiveElement(findAnnotatableEditable(document.activeElement));
 
   // Load dictionary in the background — doesn't block initial check
   loadSpellCheckDictionary().then((words) => {
