@@ -157,7 +157,7 @@ export class IssuePanelManager {
       ? 'Stet will refresh this list after each check.'
       : 'Uncheck anything you do not want included in bulk apply.';
 
-    this.issueList.innerHTML = '';
+    this.issueList.replaceChildren();
     this.emptyState.hidden = issues.length > 0;
 
     for (const issue of issues) {

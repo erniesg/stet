@@ -40,6 +40,7 @@ interface PopupIssuesState {
 
 interface PopupHistoryContextResponse {
   ok: boolean;
+  liveEditorAvailable: boolean;
   currentText: string;
   label: string | null;
   record: EditableHistoryRecord | null;
@@ -74,6 +75,7 @@ function Popup() {
   const [historySnapshots, setHistorySnapshots] = useState<VersionSnapshot[]>([]);
   const [historyCurrentText, setHistoryCurrentText] = useState('');
   const [historyLabel, setHistoryLabel] = useState<string | null>(null);
+  const [historyLiveEditorAvailable, setHistoryLiveEditorAvailable] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [selectedSnapshotId, setSelectedSnapshotId] = useState<string | null>(null);
@@ -84,7 +86,9 @@ function Popup() {
   const fixableKeys = issuesState.issues.filter((issue) => issue.canFix).map((issue) => issue.key);
   const fixableCount = fixableKeys.length;
   const selectedSnapshot = historySnapshots.find((snapshot) => snapshot.id === selectedSnapshotId) ?? null;
-  const historyDiff = selectedSnapshot ? diffText(historyCurrentText, selectedSnapshot.content) : null;
+  const historyDiff = selectedSnapshot && historyLiveEditorAvailable
+    ? diffText(historyCurrentText, selectedSnapshot.content)
+    : null;
 
   useEffect(() => {
     chrome.runtime.sendMessage({ type: 'GET_SETTINGS' }, (resp) => {
@@ -120,6 +124,7 @@ function Popup() {
       setHistorySnapshots([]);
       setHistoryCurrentText('');
       setHistoryLabel(null);
+      setHistoryLiveEditorAvailable(false);
       setSelectedSnapshotId(null);
       setHistoryError(null);
       setHistoryLoading(false);
@@ -245,7 +250,13 @@ function Popup() {
   };
 
   const captureSnapshot = () => {
-    if (activeTabId === null || issuesState.activeFrameId === null || !issuesState.activeFieldKey || historySnapshotting) return;
+    if (
+      activeTabId === null ||
+      issuesState.activeFrameId === null ||
+      !issuesState.activeFieldKey ||
+      !historyLiveEditorAvailable ||
+      historySnapshotting
+    ) return;
 
     setHistorySnapshotting(true);
     sendFrameMessage<PopupHistoryContextResponse>(activeTabId, issuesState.activeFrameId, {
@@ -272,6 +283,7 @@ function Popup() {
       activeTabId === null ||
       issuesState.activeFrameId === null ||
       !issuesState.activeFieldKey ||
+      !historyLiveEditorAvailable ||
       !selectedSnapshot ||
       historyRestoring
     ) return;
@@ -315,25 +327,28 @@ function Popup() {
         fieldKey,
       });
       const record = context?.record ?? null;
-
-      if (!context?.ok) {
-        setHistorySnapshots([]);
-        setHistoryCurrentText('');
-        setHistoryLabel(record?.label ?? issuesState.activeLabel ?? null);
-        setSelectedSnapshotId(null);
-        setHistoryError('Could not read live editor history on this page.');
-        setHistoryLoading(false);
-        return;
-      }
-
+      const liveEditorAvailable = context?.liveEditorAvailable ?? context?.ok ?? false;
       const snapshots = record?.snapshots ?? [];
       setHistorySnapshots(snapshots);
-      setHistoryCurrentText(context.currentText);
-      setHistoryLabel(context.label ?? record?.label ?? issuesState.activeLabel ?? null);
-      setSelectedSnapshotId((current) => getPreferredSnapshotId(current, snapshots, context.currentText));
-      setHistoryError(null);
+      setHistoryCurrentText(context?.currentText ?? '');
+      setHistoryLabel(context?.label ?? record?.label ?? issuesState.activeLabel ?? null);
+      setHistoryLiveEditorAvailable(liveEditorAvailable);
+      setSelectedSnapshotId((current) => getPreferredSnapshotId(
+        current,
+        snapshots,
+        context?.currentText ?? '',
+        liveEditorAvailable,
+      ));
+      setHistoryError(
+        liveEditorAvailable
+          ? null
+          : snapshots.length > 0
+            ? 'Live editor unavailable. Saved versions are available, but restore requires the field to be active on the page.'
+            : 'Could not read live editor history on this page.',
+      );
     } catch {
       setHistoryError('Could not load version history yet.');
+      setHistoryLiveEditorAvailable(false);
     } finally {
       setHistoryLoading(false);
     }
@@ -426,7 +441,7 @@ function Popup() {
 
         <div style={styles.issueSummary}>
           {issuesState.totalIssues} issue{issuesState.totalIssues === 1 ? '' : 's'} on page
-          {` · ${fixableCount} fixable here`}
+          {` · ${fixableCount} auto-fixable here`}
         </div>
 
         <div style={styles.issueMeta}>
@@ -434,6 +449,12 @@ function Popup() {
             ? `Current editor: ${issuesState.activeLabel}`
             : 'No editor detected on this page.'}
         </div>
+
+        {fixableCount === 0 && issuesState.issues.length > 0 && (
+          <div style={styles.issueMeta}>
+            Current issues are advisory only. One-click apply is limited to deterministic fixes.
+          </div>
+        )}
 
         {issuesState.editorCount > 1 && issuesState.activeLabel && (
           <div style={styles.issueMeta}>
@@ -471,6 +492,9 @@ function Popup() {
                     {formatSuggestion(issue)}
                   </div>
                   <div style={styles.issueDescription}>{issue.description}</div>
+                  {!issue.canFix && (
+                    <div style={styles.issueReadonlyHint}>Review only · no safe auto-fix</div>
+                  )}
                 </div>
               </label>
             );
@@ -505,7 +529,7 @@ function Popup() {
               type="button"
               style={styles.linkButton}
               onClick={captureSnapshot}
-              disabled={!issuesState.activeFieldKey || historySnapshotting}
+              disabled={!issuesState.activeFieldKey || !historyLiveEditorAvailable || historySnapshotting}
             >
               {historySnapshotting ? 'Saving...' : 'Snapshot now'}
             </button>
@@ -554,15 +578,19 @@ function Popup() {
 
             <div style={styles.historyPreview}>
               <div style={styles.historyPreviewSummary}>
-                {selectedSnapshot && historyDiff
-                  ? historyDiff.addedChars === 0 && historyDiff.removedChars === 0
-                    ? 'Selected version matches the current editor text.'
-                    : `Restoring this version adds ${historyDiff.addedChars.toLocaleString()} chars and removes ${historyDiff.removedChars.toLocaleString()} chars.`
-                  : 'Pick a saved version to compare against the current editor.'}
+                {selectedSnapshot
+                  ? historyLiveEditorAvailable && historyDiff
+                    ? historyDiff.addedChars === 0 && historyDiff.removedChars === 0
+                      ? 'Selected version matches the current editor text.'
+                      : `Restoring this version adds ${historyDiff.addedChars.toLocaleString()} chars and removes ${historyDiff.removedChars.toLocaleString()} chars.`
+                    : 'Live editor unavailable. Re-focus the field on the page to compare or restore.'
+                  : 'Pick a saved version to inspect it.'}
               </div>
               <div style={styles.historyDiffBox}>
-                {selectedSnapshot && historyDiff
-                  ? renderDiffPreview(historyDiff.chunks)
+                {selectedSnapshot
+                  ? historyLiveEditorAvailable && historyDiff
+                    ? renderDiffPreview(historyDiff.chunks)
+                    : <pre style={styles.historySnapshotText}>{selectedSnapshot.content}</pre>
                   : <span style={styles.emptyState}>No diff preview available.</span>}
               </div>
             </div>
@@ -570,13 +598,19 @@ function Popup() {
             <button
               type="button"
               onClick={restoreSnapshot}
-              disabled={!selectedSnapshot || historyRestoring}
+              disabled={!selectedSnapshot || !historyLiveEditorAvailable || historyRestoring}
               style={{
                 ...styles.primaryButton,
-                ...(selectedSnapshot && !historyRestoring ? {} : styles.disabledButton),
+                ...(selectedSnapshot && historyLiveEditorAvailable && !historyRestoring ? {} : styles.disabledButton),
               }}
             >
-              {historyRestoring ? 'Restoring...' : selectedSnapshot ? 'Restore selected version' : 'Select a version'}
+              {historyRestoring
+                ? 'Restoring...'
+                : !selectedSnapshot
+                  ? 'Select a version'
+                  : historyLiveEditorAvailable
+                    ? 'Restore selected version'
+                    : 'Restore unavailable'}
             </button>
           </>
         )}
@@ -629,9 +663,11 @@ function getPreferredSnapshotId(
   currentId: string | null,
   snapshots: VersionSnapshot[],
   currentText: string,
+  liveEditorAvailable: boolean,
 ): string | null {
   if (snapshots.length === 0) return null;
   if (currentId && snapshots.some((snapshot) => snapshot.id === currentId)) return currentId;
+  if (!liveEditorAvailable) return snapshots.at(-1)?.id ?? null;
 
   const latest = snapshots.at(-1);
   const fallback = snapshots.at(-2) ?? latest;
@@ -908,6 +944,12 @@ const styles: Record<string, Record<string, string | number>> = {
     maxHeight: '180px',
     overflowY: 'auto',
   },
+  historySnapshotText: {
+    margin: 0,
+    whiteSpace: 'pre-wrap',
+    wordBreak: 'break-word',
+    fontFamily: 'inherit',
+  },
   diffInsert: {
     background: 'rgba(34, 197, 94, 0.18)',
     color: '#166534',
@@ -954,6 +996,14 @@ const styles: Record<string, Record<string, string | number>> = {
     color: COLORS.gray,
     lineHeight: '1.4',
     wordBreak: 'break-word',
+  },
+  issueReadonlyHint: {
+    marginTop: '6px',
+    fontSize: '10px',
+    fontWeight: '700',
+    color: COLORS.subtle,
+    letterSpacing: '0.05em',
+    textTransform: 'uppercase',
   },
   emptyState: {
     fontSize: '12px',

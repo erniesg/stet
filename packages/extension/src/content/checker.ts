@@ -14,22 +14,32 @@ import { extractText } from './text-extractor.js';
 import { AnnotationManager } from './annotation-manager.js';
 import { loadDictionary, loadCustomTerms } from './dictionary-loader.js';
 import {
+  discoverHistoryEditables,
   discoverAnnotatableEditables,
   findAnnotatableEditable,
+  findHistoryEditable,
   getEditableTarget,
   notifyEditableChanged,
   replaceEditableRange,
   replaceEditableText,
+  supportsInlineAnnotationMarkup,
 } from './editable-target.js';
 import { resolveIssueApplyRange } from './issue-range.js';
+import { getReplacementText } from './replacement-text.js';
 import { DEFAULT_HISTORY_POLICY, verifyRestoredContent } from './version-history-core.js';
-import { loadHistoryRecordForTarget, saveSnapshotForTarget } from './version-history-store.js';
+import {
+  loadHistoryRecordByFieldKey,
+  loadHistoryRecordForTarget,
+  saveSnapshotForTarget,
+} from './version-history-store.js';
 import {
   getElapsedMs,
   getHistoryTargetLogData,
   getNow,
   logHistoryEvent,
+  recordHistoryEventRate,
 } from './version-history-debug.js';
+import { isHostAllowed } from '../host-access.js';
 
 const managers = new Map<HTMLElement, AnnotationManager>();
 const latestIssues = new Map<HTMLElement, Issue[]>();
@@ -37,7 +47,15 @@ let config: ResolvedStetConfig | null = null;
 const timers = new Map<HTMLElement, ReturnType<typeof setTimeout>>();
 let selfMutating = false;
 let activeElement: HTMLElement | null = null;
+let lastHistoryElement: HTMLElement | null = null;
 let runtimeHandlersRegistered = false;
+let checkerInitialized = false;
+let domObserver: MutationObserver | null = null;
+let dictionaryLoadPromise: Promise<string[]> | null = null;
+let historyTrackingRegistered = false;
+const CHECKER_MARK_SELECTOR = 'stet-mark';
+const INPUT_MUTATION_SUPPRESS_MS = 750;
+const recentInputAt = new WeakMap<HTMLElement, number>();
 
 interface PopupIssueRecord {
   key: string;
@@ -168,11 +186,26 @@ function runCheckAndAnnotate(element: HTMLElement) {
   if (selfMutating) return;
   if (!element.isContentEditable) return;
 
+  const startedAt = getNow();
   const text = extractText(element);
+  const beforeMarks = element.querySelectorAll(CHECKER_MARK_SELECTOR).length;
+
+  logHistoryEvent('checker:pre-check', {
+    ...getCheckerElementLogData(element),
+    textLength: text.length,
+    beforeMarks,
+  });
+
   console.log(`[stet] Checking <${element.tagName.toLowerCase()}> (${text.length} chars)`);
 
   const issues = getIssues(element);
   latestIssues.set(element, issues);
+
+  logHistoryEvent('checker:post-check', {
+    ...getCheckerElementLogData(element),
+    issueCount: issues.length,
+    elapsedMs: getElapsedMs(startedAt),
+  });
 
   if (issues.length > 0) {
     console.log(`[stet] ${issues.length} issue(s):`);
@@ -185,14 +218,39 @@ function runCheckAndAnnotate(element: HTMLElement) {
   }
 
   const mgr = getOrCreateManager(element);
+  const canInlineAnnotate = supportsInlineAnnotationMarkup(element);
+
+  logHistoryEvent('checker:pre-annotate', {
+    ...getCheckerElementLogData(element),
+    issueCount: issues.length,
+    beforeMarks,
+    canInlineAnnotate,
+  });
 
   selfMutating = true;
   try {
-    mgr.annotate(issues);
+    if (canInlineAnnotate) {
+      mgr.annotate(issues);
+    } else {
+      mgr.clear();
+      logHistoryEvent('checker:inline-annotations-skip', {
+        ...getCheckerElementLogData(element),
+        issueCount: issues.length,
+        reason: 'complex-contenteditable-dom',
+      });
+    }
   } finally {
     requestAnimationFrame(() => { selfMutating = false; });
   }
 
+  logHistoryEvent('checker:run', {
+    ...getCheckerElementLogData(element),
+    textLength: text.length,
+    issueCount: issues.length,
+    beforeMarks,
+    afterMarks: element.querySelectorAll(CHECKER_MARK_SELECTOR).length,
+    elapsedMs: getElapsedMs(startedAt),
+  });
   syncPageState();
 }
 
@@ -201,6 +259,10 @@ function scheduleCheck(element: HTMLElement) {
   const existing = timers.get(element);
   if (existing) clearTimeout(existing);
   const delay = config?.debounceMs ?? 800;
+  recordHistoryEventRate('checker:schedule', {
+    ...getCheckerElementLogData(element),
+    delay,
+  });
   timers.set(element, setTimeout(() => runCheckAndAnnotate(element), delay));
 }
 
@@ -216,6 +278,10 @@ function pruneDisconnectedElements() {
 
   if (activeElement && !activeElement.isConnected) {
     activeElement = null;
+  }
+
+  if (lastHistoryElement && !lastHistoryElement.isConnected) {
+    lastHistoryElement = null;
   }
 }
 
@@ -261,6 +327,49 @@ function getPopupElementLabel(element: HTMLElement): string {
     ?? (element.id ? `#${element.id}` : element.tagName.toLowerCase());
 }
 
+function getCheckerElementLogData(element: HTMLElement): Record<string, unknown> {
+  const target = getEditableTarget(element);
+  if (target) {
+    return getHistoryTargetLogData(target);
+  }
+
+  return {
+    descriptor: element.id ? `${element.tagName.toLowerCase()}#${element.id}` : element.tagName.toLowerCase(),
+    label: getPopupElementLabel(element),
+    kind: element.isContentEditable ? 'contenteditable' : element.tagName.toLowerCase(),
+  };
+}
+
+function getEditableFieldKey(element: HTMLElement | null): string | null {
+  return element ? (getEditableTarget(element)?.fieldKey ?? null) : null;
+}
+
+function rememberHistoryElement(start: EventTarget | null): boolean {
+  const editable = findHistoryEditable(start);
+  if (!editable?.isConnected) return false;
+
+  const previousElement = lastHistoryElement;
+  const previousFieldKey = getEditableFieldKey(previousElement);
+
+  lastHistoryElement = editable;
+
+  return previousElement !== editable || previousFieldKey !== getEditableFieldKey(editable);
+}
+
+function getTrackedHistoryElement(): HTMLElement | null {
+  const activeHistoryElement = findHistoryEditable(document.activeElement);
+  if (activeHistoryElement?.isConnected) {
+    lastHistoryElement = activeHistoryElement;
+    return activeHistoryElement;
+  }
+
+  if (lastHistoryElement?.isConnected) {
+    return lastHistoryElement;
+  }
+
+  return null;
+}
+
 function serializeIssue(issue: Issue): PopupIssueRecord {
   return {
     key: getIssueSelectionKey(issue),
@@ -275,6 +384,9 @@ function serializeIssue(issue: Issue): PopupIssueRecord {
 
 function getPreferredPopupElement(): HTMLElement | null {
   pruneDisconnectedElements();
+
+  const activeHistoryElement = getTrackedHistoryElement();
+  if (activeHistoryElement) return activeHistoryElement;
 
   if (activeElement?.isConnected) return activeElement;
 
@@ -305,6 +417,7 @@ function getPopupIssuesState(): PopupIssueState {
 }
 
 async function applySelectedFixes(element: HTMLElement, selectedIssueKeys: string[]): Promise<number> {
+  const startedAt = getNow();
   const issues = latestIssues.get(element) ?? [];
   if (issues.length === 0) return 0;
 
@@ -323,9 +436,10 @@ async function applySelectedFixes(element: HTMLElement, selectedIssueKeys: strin
     const range = resolveIssueApplyRange(text, issue);
     if (!range) continue;
     if (range.end > nextLockedStart) continue;
+    const replacement = getReplacementText(text, range.start, issue.originalText, issue.suggestion!);
 
     if (element.isContentEditable) {
-      const replaced = replaceEditableRange(element, range.start, range.end, issue.suggestion!);
+      const replaced = replaceEditableRange(element, range.start, range.end, replacement);
       if (!replaced) {
         usedFullReplacement = true;
       }
@@ -333,7 +447,7 @@ async function applySelectedFixes(element: HTMLElement, selectedIssueKeys: strin
       usedFullReplacement = true;
     }
 
-    text = `${text.slice(0, range.start)}${issue.suggestion!}${text.slice(range.end)}`;
+    text = `${text.slice(0, range.start)}${replacement}${text.slice(range.end)}`;
     nextLockedStart = range.start;
     applied += 1;
   }
@@ -347,27 +461,51 @@ async function applySelectedFixes(element: HTMLElement, selectedIssueKeys: strin
     runCheckAndAnnotate(element);
   }
 
+  logHistoryEvent('checker:apply', {
+    ...getCheckerElementLogData(element),
+    selectedCount: selected.length,
+    appliedCount: applied,
+    usedFullReplacement,
+    resultingIssueCount: (latestIssues.get(element) ?? []).length,
+    elapsedMs: getElapsedMs(startedAt),
+  }, { level: applied > 0 ? 'debug' : 'warn' });
+
   return applied;
 }
 
 async function getEditorHistoryState(fieldKey: string): Promise<{
   ok: boolean;
+  liveEditorAvailable: boolean;
   currentText: string;
   label: string | null;
   record: import('./version-history-core.js').EditableHistoryRecord | null;
 }> {
   const element = findElementByFieldKey(fieldKey);
   if (!element) {
-    return { ok: false, currentText: '', label: null, record: null };
+    const record = await loadHistoryRecordByFieldKey(fieldKey);
+    return {
+      ok: false,
+      liveEditorAvailable: false,
+      currentText: '',
+      label: record?.label ?? null,
+      record,
+    };
   }
 
   const target = getEditableTarget(element);
   if (!target) {
-    return { ok: false, currentText: extractText(element), label: getPopupElementLabel(element), record: null };
+    return {
+      ok: false,
+      liveEditorAvailable: false,
+      currentText: extractText(element),
+      label: getPopupElementLabel(element),
+      record: await loadHistoryRecordByFieldKey(fieldKey),
+    };
   }
 
   return {
     ok: true,
+    liveEditorAvailable: true,
     currentText: extractText(element),
     label: getPopupElementLabel(element),
     record: await loadHistoryRecordForTarget(target),
@@ -452,12 +590,40 @@ async function restoreEditorSnapshot(
 function findElementByFieldKey(fieldKey: string): HTMLElement | null {
   pruneDisconnectedElements();
 
+  const activeHistoryElement = getTrackedHistoryElement();
+  if (activeHistoryElement && getEditableFieldKey(activeHistoryElement) === fieldKey) {
+    return activeHistoryElement;
+  }
+
   for (const [element] of managers) {
     if (!element.isConnected) continue;
     if (getEditableTarget(element)?.fieldKey === fieldKey) return element;
   }
 
+  for (const element of discoverHistoryEditables()) {
+    if (getEditableFieldKey(element) !== fieldKey) continue;
+    lastHistoryElement = element;
+    return element;
+  }
+
   return null;
+}
+
+function registerHistoryTracking() {
+  if (historyTrackingRegistered) return;
+  historyTrackingRegistered = true;
+
+  document.addEventListener('focusin', (event) => {
+    if (rememberHistoryElement(event.target)) {
+      syncPageState();
+    }
+  }, true);
+
+  document.addEventListener('input', (event) => {
+    if (rememberHistoryElement(event.target)) {
+      syncPageState();
+    }
+  }, true);
 }
 
 function registerRuntimeHandlers() {
@@ -537,14 +703,18 @@ function findEditableForNode(node: Node | null): HTMLElement | null {
 function attachListener(el: HTMLElement) {
   if (managers.has(el)) return;
   managers.set(el, createAnnotationManager(el));
+  logHistoryEvent('checker:attach', getCheckerElementLogData(el));
 
   el.addEventListener('input', () => {
     if (selfMutating) return;
+    recentInputAt.set(el, getNow());
+    recordHistoryEventRate('checker:input', getCheckerElementLogData(el));
     scheduleCheck(el);
   });
 
   el.addEventListener('focus', () => {
     activeElement = el;
+    logHistoryEvent('checker:focus', getCheckerElementLogData(el));
     syncPageState();
   });
 
@@ -570,12 +740,19 @@ function getOrCreateManager(element: HTMLElement): AnnotationManager {
 
 function discoverEditables() {
   pruneDisconnectedElements();
-  discoverAnnotatableEditables().forEach(attachListener);
+  const editables = discoverAnnotatableEditables();
+  editables.forEach(attachListener);
+  logHistoryEvent('checker:discover', {
+    hostname: window.location.hostname,
+    count: editables.length,
+  });
   syncPageState();
 }
 
 function observeDOM() {
-  const observer = new MutationObserver((mutations) => {
+  if (domObserver) return;
+
+  domObserver = new MutationObserver((mutations) => {
     if (selfMutating) return;
 
     pruneDisconnectedElements();
@@ -601,11 +778,23 @@ function observeDOM() {
     }
 
     changedEditables.forEach((editable) => {
-      if (editable.isConnected) scheduleCheck(editable);
+      if (!editable.isConnected) return;
+
+      const lastInputAt = recentInputAt.get(editable);
+      if (typeof lastInputAt === 'number' && getNow() - lastInputAt < INPUT_MUTATION_SUPPRESS_MS) {
+        recordHistoryEventRate('checker:mutation-skip-after-input', getCheckerElementLogData(editable));
+        return;
+      }
+
+      scheduleCheck(editable);
+    });
+    recordHistoryEventRate('checker:mutation-batch', {
+      mutationCount: mutations.length,
+      changedEditableCount: changedEditables.size,
     });
     syncPageState();
   });
-  observer.observe(document.body ?? document.documentElement, {
+  domObserver.observe(document.body ?? document.documentElement, {
     childList: true,
     subtree: true,
     characterData: true,
@@ -634,6 +823,13 @@ async function loadSpellCheckDictionary(): Promise<string[]> {
   }
 }
 
+function loadSpellCheckDictionaryOnce(): Promise<string[]> {
+  if (!dictionaryLoadPromise) {
+    dictionaryLoadPromise = loadSpellCheckDictionary();
+  }
+  return dictionaryLoadPromise;
+}
+
 /** Callback type for dictionary loading hook */
 export type OnDictionaryLoaded = (words: string[]) => void;
 
@@ -645,6 +841,12 @@ export type OnDictionaryLoaded = (words: string[]) => void;
  *   rules (e.g., `loadWordList(words)` in bt-pack).
  */
 export async function initChecker(onDictionaryLoaded?: OnDictionaryLoaded) {
+  if (checkerInitialized) {
+    console.warn('[stet] Checker already initialized; skipping duplicate init');
+    return;
+  }
+  checkerInitialized = true;
+
   config = await loadConfig();
 
   // Override config packs with whatever is actually registered
@@ -661,9 +863,9 @@ export async function initChecker(onDictionaryLoaded?: OnDictionaryLoaded) {
 
   if (!config.enabled) { console.log('[stet] Disabled'); return; }
 
-  if (config.siteAllowlist.length > 0) {
-    const host = window.location.hostname;
-    if (!config.siteAllowlist.some(s => host.includes(s))) return;
+  if (!isHostAllowed(window.location.hostname, config.siteAllowlist)) {
+    console.log('[stet] Skipping checker on host', window.location.hostname);
+    return;
   }
 
   console.log('[stet] Active — packs:', registered.map(id => {
@@ -674,11 +876,13 @@ export async function initChecker(onDictionaryLoaded?: OnDictionaryLoaded) {
   discoverEditables();
   observeDOM();
   registerRuntimeHandlers();
+  registerHistoryTracking();
   activeElement = findAnnotatableEditable(document.activeElement);
+  lastHistoryElement = findHistoryEditable(document.activeElement);
   syncPageState();
 
   // Load dictionary in the background — doesn't block initial check
-  loadSpellCheckDictionary().then((words) => {
+  loadSpellCheckDictionaryOnce().then((words) => {
     if (words.length > 0 && onDictionaryLoaded) {
       onDictionaryLoaded(words);
       console.log(`[stet] Dictionary ready (${words.length} words)`);
