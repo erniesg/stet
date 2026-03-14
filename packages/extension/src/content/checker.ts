@@ -22,6 +22,8 @@ import {
   replaceEditableText,
 } from './editable-target.js';
 import { resolveIssueApplyRange } from './issue-range.js';
+import { DEFAULT_HISTORY_POLICY } from './version-history-core.js';
+import { loadHistoryRecord, saveSnapshotForTarget } from './version-history-store.js';
 
 const managers = new Map<HTMLElement, AnnotationManager>();
 const latestIssues = new Map<HTMLElement, Issue[]>();
@@ -342,6 +344,77 @@ async function applySelectedFixes(element: HTMLElement, selectedIssueKeys: strin
   return applied;
 }
 
+async function getEditorHistoryState(fieldKey: string): Promise<{
+  ok: boolean;
+  currentText: string;
+  label: string | null;
+}> {
+  const element = findElementByFieldKey(fieldKey);
+  if (!element) {
+    return { ok: false, currentText: '', label: null };
+  }
+
+  return {
+    ok: true,
+    currentText: extractText(element),
+    label: getPopupElementLabel(element),
+  };
+}
+
+async function captureEditorSnapshot(fieldKey: string): Promise<{
+  ok: boolean;
+  currentText: string;
+}> {
+  const element = findElementByFieldKey(fieldKey);
+  if (!element) {
+    return { ok: false, currentText: '' };
+  }
+
+  const target = getEditableTarget(element);
+  if (!target) {
+    return { ok: false, currentText: '' };
+  }
+
+  const currentText = extractText(element);
+  await saveSnapshotForTarget(target, currentText, 'manual', DEFAULT_HISTORY_POLICY, true);
+  return { ok: true, currentText };
+}
+
+async function restoreEditorSnapshot(
+  fieldKey: string,
+  snapshotId: string,
+): Promise<{
+  ok: boolean;
+  currentText: string;
+  state: PopupIssueState;
+}> {
+  const element = findElementByFieldKey(fieldKey);
+  if (!element) {
+    return { ok: false, currentText: '', state: getPopupIssuesState() };
+  }
+
+  const target = getEditableTarget(element);
+  if (!target) {
+    return { ok: false, currentText: '', state: getPopupIssuesState() };
+  }
+
+  const record = await loadHistoryRecord(target.storageKey);
+  const snapshot = record?.snapshots.find((entry) => entry.id === snapshotId);
+  if (!snapshot) {
+    return { ok: false, currentText: extractText(element), state: getPopupIssuesState() };
+  }
+
+  replaceEditableText(element, snapshot.content);
+  await saveSnapshotForTarget(target, snapshot.content, 'restore', DEFAULT_HISTORY_POLICY, true);
+  runCheckAndAnnotate(element);
+
+  return {
+    ok: true,
+    currentText: snapshot.content,
+    state: getPopupIssuesState(),
+  };
+}
+
 function findElementByFieldKey(fieldKey: string): HTMLElement | null {
   pruneDisconnectedElements();
 
@@ -377,6 +450,25 @@ function registerRuntimeHandlers() {
         void applySelectedFixes(element, issueKeys).then((applied) => {
           sendResponse({ ok: true, applied, state: getPopupIssuesState() });
         });
+        return true;
+      }
+
+      if (message?.type === 'GET_EDITOR_HISTORY_STATE') {
+        const fieldKey = typeof message.fieldKey === 'string' ? message.fieldKey : '';
+        void getEditorHistoryState(fieldKey).then(sendResponse);
+        return true;
+      }
+
+      if (message?.type === 'CAPTURE_EDITOR_SNAPSHOT') {
+        const fieldKey = typeof message.fieldKey === 'string' ? message.fieldKey : '';
+        void captureEditorSnapshot(fieldKey).then(sendResponse);
+        return true;
+      }
+
+      if (message?.type === 'RESTORE_EDITOR_SNAPSHOT') {
+        const fieldKey = typeof message.fieldKey === 'string' ? message.fieldKey : '';
+        const snapshotId = typeof message.snapshotId === 'string' ? message.snapshotId : '';
+        void restoreEditorSnapshot(fieldKey, snapshotId).then(sendResponse);
         return true;
       }
 
