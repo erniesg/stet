@@ -16,17 +16,37 @@ import { loadDictionary, loadCustomTerms } from './dictionary-loader.js';
 import {
   discoverAnnotatableEditables,
   findAnnotatableEditable,
+  getEditableTarget,
   replaceEditableText,
 } from './editable-target.js';
 import { resolveIssueRange } from './issue-range.js';
-import { IssuePanelManager, getIssueSelectionKey } from './issue-panel.js';
 
 const managers = new Map<HTMLElement, AnnotationManager>();
 const latestIssues = new Map<HTMLElement, Issue[]>();
 let config: ResolvedStetConfig | null = null;
 const timers = new Map<HTMLElement, ReturnType<typeof setTimeout>>();
 let selfMutating = false;
-let issuePanel: IssuePanelManager | null = null;
+let activeElement: HTMLElement | null = null;
+let runtimeHandlersRegistered = false;
+
+interface PopupIssueRecord {
+  key: string;
+  rule: string;
+  severity: Issue['severity'];
+  originalText: string;
+  suggestion: string | null | undefined;
+  description: string;
+  canFix: boolean;
+}
+
+interface PopupIssueState {
+  enabled: boolean;
+  totalIssues: number;
+  editorCount: number;
+  activeFieldKey: string | null;
+  activeLabel: string | null;
+  issues: PopupIssueRecord[];
+}
 
 // ---------------------------------------------------------------------------
 // Config
@@ -143,7 +163,6 @@ function runCheckAndAnnotate(element: HTMLElement) {
 
   const issues = getIssues(element);
   latestIssues.set(element, issues);
-  issuePanel?.updateIssues(element, issues);
 
   if (issues.length > 0) {
     console.log(`[stet] ${issues.length} issue(s):`);
@@ -188,10 +207,13 @@ function pruneDisconnectedElements() {
     if (element.isConnected) continue;
     managers.delete(element);
     latestIssues.delete(element);
-    issuePanel?.removeElement(element);
     const timer = timers.get(element);
     if (timer) clearTimeout(timer);
     timers.delete(element);
+  }
+
+  if (activeElement && !activeElement.isConnected) {
+    activeElement = null;
   }
 }
 
@@ -208,6 +230,153 @@ function getPageIssueCount(): number {
 
 function syncBadge() {
   updateBadge(getPageIssueCount());
+}
+
+function getEditorCount(): number {
+  pruneDisconnectedElements();
+
+  let total = 0;
+  for (const [element] of managers) {
+    if (!element.isConnected) continue;
+    total += 1;
+  }
+  return total;
+}
+
+function getIssueSelectionKey(issue: Issue): string {
+  if (issue.fingerprint) return `${issue.fingerprint}:${issue.offset}:${issue.length}`;
+  return `${issue.rule}:${issue.offset}:${issue.length}:${issue.originalText}`;
+}
+
+function getPopupElementLabel(element: HTMLElement): string {
+  return getEditableTarget(element)?.label
+    ?? element.getAttribute('aria-label')?.trim()
+    ?? (element.id ? `#${element.id}` : element.tagName.toLowerCase());
+}
+
+function serializeIssue(issue: Issue): PopupIssueRecord {
+  return {
+    key: getIssueSelectionKey(issue),
+    rule: issue.rule,
+    severity: issue.severity,
+    originalText: issue.originalText,
+    suggestion: issue.suggestion,
+    description: issue.description,
+    canFix: issue.canFix && typeof issue.suggestion === 'string',
+  };
+}
+
+function getPreferredPopupElement(): HTMLElement | null {
+  pruneDisconnectedElements();
+
+  if (activeElement?.isConnected) return activeElement;
+
+  for (const [element, issues] of latestIssues) {
+    if (element.isConnected && issues.length > 0) return element;
+  }
+
+  for (const [element] of managers) {
+    if (element.isConnected) return element;
+  }
+
+  return null;
+}
+
+function getPopupIssuesState(): PopupIssueState {
+  const element = getPreferredPopupElement();
+  const issues = element ? (latestIssues.get(element) ?? []) : [];
+  const target = element ? getEditableTarget(element) : null;
+
+  return {
+    enabled: config?.enabled ?? false,
+    totalIssues: getPageIssueCount(),
+    editorCount: getEditorCount(),
+    activeFieldKey: target?.fieldKey ?? null,
+    activeLabel: element ? getPopupElementLabel(element) : null,
+    issues: issues.map(serializeIssue),
+  };
+}
+
+async function applySelectedFixes(element: HTMLElement, selectedIssueKeys: string[]): Promise<number> {
+  const issues = latestIssues.get(element) ?? [];
+  if (issues.length === 0) return 0;
+
+  let text = extractText(element);
+  let applied = 0;
+  let nextLockedStart = Number.POSITIVE_INFINITY;
+
+  const selected = issues
+    .filter((issue) => selectedIssueKeys.includes(getIssueSelectionKey(issue)))
+    .filter((issue) => issue.canFix && typeof issue.suggestion === 'string')
+    .sort((left, right) => right.offset - left.offset);
+
+  for (const issue of selected) {
+    const range = resolveIssueRange(text, issue);
+    if (!range) continue;
+    if (range.end > nextLockedStart) continue;
+
+    text = `${text.slice(0, range.start)}${issue.suggestion!}${text.slice(range.end)}`;
+    nextLockedStart = range.start;
+    applied += 1;
+  }
+
+  if (applied > 0) {
+    replaceEditableText(element, text);
+    runCheckAndAnnotate(element);
+  }
+
+  return applied;
+}
+
+function findElementByFieldKey(fieldKey: string): HTMLElement | null {
+  pruneDisconnectedElements();
+
+  for (const [element] of managers) {
+    if (!element.isConnected) continue;
+    if (getEditableTarget(element)?.fieldKey === fieldKey) return element;
+  }
+
+  return null;
+}
+
+function registerRuntimeHandlers() {
+  if (runtimeHandlersRegistered) return;
+  runtimeHandlersRegistered = true;
+
+  try {
+    chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+      if (message?.type === 'GET_PAGE_ISSUES') {
+        sendResponse(getPopupIssuesState());
+        return false;
+      }
+
+      if (message?.type === 'APPLY_EDITOR_ISSUES') {
+        const fieldKey = typeof message.fieldKey === 'string' ? message.fieldKey : '';
+        const issueKeys = Array.isArray(message.issueKeys) ? message.issueKeys : [];
+        const element = findElementByFieldKey(fieldKey);
+
+        if (!element) {
+          sendResponse({ ok: false, applied: 0, state: getPopupIssuesState() });
+          return false;
+        }
+
+        void applySelectedFixes(element, issueKeys).then((applied) => {
+          sendResponse({ ok: true, applied, state: getPopupIssuesState() });
+        });
+        return true;
+      }
+
+      return false;
+    });
+  } catch {}
+}
+
+function refreshAllChecks() {
+  pruneDisconnectedElements();
+  discoverAnnotatableEditables().forEach((element) => {
+    attachListener(element);
+    runCheckAndAnnotate(element);
+  });
 }
 
 function findEditableForNode(node: Node | null): HTMLElement | null {
@@ -235,7 +404,7 @@ function attachListener(el: HTMLElement) {
   });
 
   el.addEventListener('focus', () => {
-    issuePanel?.setActiveElement(el);
+    activeElement = el;
   });
 
   setTimeout(() => runCheckAndAnnotate(el), 300);
@@ -344,46 +513,18 @@ export async function initChecker(onDictionaryLoaded?: OnDictionaryLoaded) {
     return `${id} (${p?.rules.length ?? 0} rules)`;
   }).join(', '));
 
-  issuePanel = new IssuePanelManager(async (element, selectedIssueKeys) => {
-    const issues = latestIssues.get(element) ?? [];
-    if (issues.length === 0) return 0;
-
-    let text = extractText(element);
-    let applied = 0;
-    let nextLockedStart = Number.POSITIVE_INFINITY;
-
-    const selected = issues
-      .filter((issue) => selectedIssueKeys.includes(getIssueSelectionKey(issue)))
-      .filter((issue) => issue.canFix && typeof issue.suggestion === 'string')
-      .sort((left, right) => right.offset - left.offset);
-
-    for (const issue of selected) {
-      const range = resolveIssueRange(text, issue);
-      if (!range) continue;
-      if (range.end > nextLockedStart) continue;
-
-      text = `${text.slice(0, range.start)}${issue.suggestion!}${text.slice(range.end)}`;
-      nextLockedStart = range.start;
-      applied += 1;
-    }
-
-    if (applied > 0) {
-      replaceEditableText(element, text);
-    }
-
-    return applied;
-  });
-
   updateBadge(0);
   discoverEditables();
   observeDOM();
-  issuePanel.setActiveElement(findAnnotatableEditable(document.activeElement));
+  registerRuntimeHandlers();
+  activeElement = findAnnotatableEditable(document.activeElement);
 
   // Load dictionary in the background — doesn't block initial check
   loadSpellCheckDictionary().then((words) => {
     if (words.length > 0 && onDictionaryLoaded) {
       onDictionaryLoaded(words);
       console.log(`[stet] Dictionary ready (${words.length} words)`);
+      refreshAllChecks();
     }
   });
 }

@@ -14,6 +14,10 @@ function copyExtensionAssets() {
         resolve(__dirname, 'src/styles/annotations.css'),
         resolve(dist, 'annotations.css'),
       );
+      copyFileSync(
+        resolve(__dirname, '..', '..', 'data', 'wordlist-en.txt'),
+        resolve(dist, 'wordlist-en.txt'),
+      );
 
       const iconsDir = resolve(dist, 'assets/icons');
       if (!existsSync(iconsDir)) {

@@ -11,9 +11,18 @@
  * Default points to the stet repo's data directory via jsDelivr CDN.
  */
 
-/** Default dictionary URL — served via jsDelivr with CORS + gzip */
+/** Default fallback dictionary URL — served via jsDelivr with CORS + gzip */
+const DICTIONARY_VERSION = '20260314-merged';
 const DEFAULT_DICTIONARY_URL =
-  'https://cdn.jsdelivr.net/gh/erniesg/stet@main/data/wordlist-en.txt';
+  `https://cdn.jsdelivr.net/gh/erniesg/stet@main/data/wordlist-en.txt?v=${DICTIONARY_VERSION}`;
+
+function getBundledDictionaryUrl(): string | null {
+  try {
+    return `${chrome.runtime.getURL('wordlist-en.txt')}?v=${DICTIONARY_VERSION}`;
+  } catch {
+    return null;
+  }
+}
 
 /** Cache key in chrome.storage.local */
 const CACHE_KEY = 'stet_dictionary';
@@ -30,7 +39,7 @@ interface CachedDictionary {
  * Returns an array of valid English words.
  */
 export async function loadDictionary(
-  url: string = DEFAULT_DICTIONARY_URL,
+  url: string = getBundledDictionaryUrl() ?? DEFAULT_DICTIONARY_URL,
 ): Promise<string[]> {
   // 1. Try cache
   const cached = await getCached();
