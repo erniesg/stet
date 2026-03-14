@@ -30,6 +30,7 @@ interface PopupIssuesState {
   enabled: boolean;
   totalIssues: number;
   editorCount: number;
+  activeFrameId: number | null;
   activeFieldKey: string | null;
   activeLabel: string | null;
   issues: PopupIssue[];
@@ -39,6 +40,7 @@ const EMPTY_ISSUES_STATE: PopupIssuesState = {
   enabled: false,
   totalIssues: 0,
   editorCount: 0,
+  activeFrameId: null,
   activeFieldKey: null,
   activeLabel: null,
   issues: [],
@@ -53,8 +55,8 @@ function Popup() {
   const [selectedByField, setSelectedByField] = useState<Record<string, string[]>>({});
   const [issuesError, setIssuesError] = useState<string | null>(null);
   const [applying, setApplying] = useState(false);
-  const activeFieldKey = issuesState.activeFieldKey;
-  const selectedKeys = activeFieldKey ? (selectedByField[activeFieldKey] ?? []) : [];
+  const activeTargetKey = getActiveTargetKey(issuesState);
+  const selectedKeys = activeTargetKey ? (selectedByField[activeTargetKey] ?? []) : [];
   const fixableKeys = issuesState.issues.filter((issue) => issue.canFix).map((issue) => issue.key);
   const fixableCount = fixableKeys.length;
 
@@ -72,17 +74,17 @@ function Popup() {
   }, []);
 
   useEffect(() => {
-    if (!activeFieldKey) return;
+    if (!activeTargetKey) return;
 
     setSelectedByField((prev) => {
-      const existing = prev[activeFieldKey];
+      const existing = prev[activeTargetKey];
       const nextSelection = existing
         ? fixableKeys.filter((key) => existing.includes(key))
         : [...fixableKeys];
 
-      return { ...prev, [activeFieldKey]: nextSelection };
+      return { ...prev, [activeTargetKey]: nextSelection };
     });
-  }, [activeFieldKey, fixableKeys.join('|')]);
+  }, [activeTargetKey, fixableKeys.join('|')]);
 
   const toggle = () => {
     const next = !enabled;
@@ -117,25 +119,27 @@ function Popup() {
   };
 
   const toggleIssueSelection = (issueKey: string, checked: boolean) => {
-    if (!activeFieldKey) return;
+    if (!activeTargetKey) return;
 
     setSelectedByField((prev) => {
-      const current = prev[activeFieldKey] ?? [];
+      const current = prev[activeTargetKey] ?? [];
       const next = checked
         ? [...current, issueKey]
         : current.filter((key) => key !== issueKey);
-      return { ...prev, [activeFieldKey]: next };
+      return { ...prev, [activeTargetKey]: next };
     });
   };
 
   const applySelected = () => {
-    if (!activeFieldKey || selectedKeys.length === 0 || applying) return;
+    if (!issuesState.activeFieldKey || issuesState.activeFrameId === null || selectedKeys.length === 0 || applying) return;
 
     setApplying(true);
     withActiveTab((tabId) => {
-      chrome.tabs.sendMessage(tabId, {
-        type: 'APPLY_EDITOR_ISSUES',
-        fieldKey: activeFieldKey,
+      chrome.runtime.sendMessage({
+        type: 'APPLY_TAB_ISSUES',
+        tabId,
+        frameId: issuesState.activeFrameId,
+        fieldKey: issuesState.activeFieldKey,
         issueKeys: selectedKeys,
       }, (resp) => {
         setApplying(false);
@@ -326,7 +330,7 @@ function loadPageIssues(
   setIssuesError: (error: string | null) => void,
 ) {
   withActiveTab((tabId) => {
-    chrome.tabs.sendMessage(tabId, { type: 'GET_PAGE_ISSUES' }, (resp) => {
+    chrome.runtime.sendMessage({ type: 'GET_TAB_ISSUES', tabId }, (resp) => {
       if (chrome.runtime.lastError) {
         setIssuesState(EMPTY_ISSUES_STATE);
         setIssuesError('Could not read issues from this page yet.');
@@ -340,6 +344,11 @@ function loadPageIssues(
     setIssuesState(EMPTY_ISSUES_STATE);
     setIssuesError('Could not find the active tab.');
   });
+}
+
+function getActiveTargetKey(state: PopupIssuesState): string | null {
+  if (state.activeFrameId === null || !state.activeFieldKey) return null;
+  return `${state.activeFrameId}:${state.activeFieldKey}`;
 }
 
 function withActiveTab(onTab: (tabId: number) => void, onMissing?: () => void) {

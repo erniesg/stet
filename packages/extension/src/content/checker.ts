@@ -187,7 +187,7 @@ function runCheckAndAnnotate(element: HTMLElement) {
     requestAnimationFrame(() => { selfMutating = false; });
   }
 
-  syncBadge();
+  syncPageState();
 }
 
 function scheduleCheck(element: HTMLElement) {
@@ -196,10 +196,6 @@ function scheduleCheck(element: HTMLElement) {
   if (existing) clearTimeout(existing);
   const delay = config?.debounceMs ?? 800;
   timers.set(element, setTimeout(() => runCheckAndAnnotate(element), delay));
-}
-
-function updateBadge(count: number) {
-  try { chrome.runtime.sendMessage({ type: 'UPDATE_BADGE', count }); } catch {}
 }
 
 function pruneDisconnectedElements() {
@@ -228,8 +224,13 @@ function getPageIssueCount(): number {
   return total;
 }
 
-function syncBadge() {
-  updateBadge(getPageIssueCount());
+function syncPageState() {
+  try {
+    chrome.runtime.sendMessage({
+      type: 'SYNC_PAGE_ISSUES',
+      state: getPopupIssuesState(),
+    });
+  } catch {}
 }
 
 function getEditorCount(): number {
@@ -405,6 +406,7 @@ function attachListener(el: HTMLElement) {
 
   el.addEventListener('focus', () => {
     activeElement = el;
+    syncPageState();
   });
 
   setTimeout(() => runCheckAndAnnotate(el), 300);
@@ -413,7 +415,7 @@ function attachListener(el: HTMLElement) {
 function discoverEditables() {
   pruneDisconnectedElements();
   discoverAnnotatableEditables().forEach(attachListener);
-  syncBadge();
+  syncPageState();
 }
 
 function observeDOM() {
@@ -445,7 +447,7 @@ function observeDOM() {
     changedEditables.forEach((editable) => {
       if (editable.isConnected) scheduleCheck(editable);
     });
-    syncBadge();
+    syncPageState();
   });
   observer.observe(document.body ?? document.documentElement, {
     childList: true,
@@ -513,11 +515,11 @@ export async function initChecker(onDictionaryLoaded?: OnDictionaryLoaded) {
     return `${id} (${p?.rules.length ?? 0} rules)`;
   }).join(', '));
 
-  updateBadge(0);
   discoverEditables();
   observeDOM();
   registerRuntimeHandlers();
   activeElement = findAnnotatableEditable(document.activeElement);
+  syncPageState();
 
   // Load dictionary in the background — doesn't block initial check
   loadSpellCheckDictionary().then((words) => {

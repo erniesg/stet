@@ -7,7 +7,7 @@ stet-mark {
   text-decoration-thickness: 2px;
   text-underline-offset: 2px;
   text-decoration-skip-ink: none;
-  cursor: pointer;
+  cursor: text;
   position: relative;
   border-radius: 1px;
   transition: background 0.15s;

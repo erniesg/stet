@@ -181,6 +181,110 @@ export class AnnotationManager {
     return entries;
   }
 
+  private captureSelection(textNodes: { node: Text; start: number; end: number }[]): {
+    start: number;
+    end: number;
+  } | null {
+    const selection = this.element.ownerDocument.getSelection();
+    if (!selection || selection.rangeCount === 0) return null;
+
+    const range = selection.getRangeAt(0);
+    if (!this.element.contains(range.startContainer) || !this.element.contains(range.endContainer)) {
+      return null;
+    }
+
+    const start = this.resolveDomPointToOffset(range.startContainer, range.startOffset, textNodes);
+    const end = this.resolveDomPointToOffset(range.endContainer, range.endOffset, textNodes);
+    if (start === null || end === null) return null;
+
+    return { start, end };
+  }
+
+  private resolveDomPointToOffset(
+    container: Node,
+    offset: number,
+    textNodes: { node: Text; start: number; end: number }[],
+  ): number | null {
+    if (container instanceof Text) {
+      const entry = textNodes.find((item) => item.node === container);
+      if (!entry) return null;
+      return entry.start + Math.min(Math.max(offset, 0), container.textContent?.length ?? 0);
+    }
+
+    try {
+      const range = this.element.ownerDocument.createRange();
+      range.selectNodeContents(this.element);
+      range.setEnd(container, offset);
+      return range.toString().length;
+    } catch {
+      return null;
+    }
+  }
+
+  private resolveOffsetToDomPoint(
+    offset: number,
+    textNodes: { node: Text; start: number; end: number }[],
+  ): { node: Node; offset: number } {
+    if (textNodes.length === 0) {
+      return { node: this.element, offset: 0 };
+    }
+
+    const clampedOffset = Math.max(0, offset);
+    for (const entry of textNodes) {
+      if (clampedOffset <= entry.end) {
+        return {
+          node: entry.node,
+          offset: Math.max(0, Math.min(entry.node.textContent?.length ?? 0, clampedOffset - entry.start)),
+        };
+      }
+    }
+
+    const last = textNodes[textNodes.length - 1];
+    return {
+      node: last.node,
+      offset: last.node.textContent?.length ?? 0,
+    };
+  }
+
+  private restoreSelection(
+    selectionState: { start: number; end: number } | null,
+    textNodes: { node: Text; start: number; end: number }[],
+  ): void {
+    if (!selectionState) return;
+
+    const selection = this.element.ownerDocument.getSelection();
+    if (!selection) return;
+
+    try {
+      const start = this.resolveOffsetToDomPoint(selectionState.start, textNodes);
+      const end = this.resolveOffsetToDomPoint(selectionState.end, textNodes);
+      const range = this.element.ownerDocument.createRange();
+      range.setStart(start.node, start.offset);
+      range.setEnd(end.node, end.offset);
+      selection.removeAllRanges();
+      selection.addRange(range);
+    } catch {
+      // Ignore restore failures; keeping editing stable is best-effort here.
+    }
+  }
+
+  private intersectsActiveSelection(
+    issueStart: number,
+    issueEnd: number,
+    selectionState: { start: number; end: number } | null,
+  ): boolean {
+    if (!selectionState) return false;
+
+    const start = Math.min(selectionState.start, selectionState.end);
+    const end = Math.max(selectionState.start, selectionState.end);
+
+    if (start === end) {
+      return start >= issueStart && start <= issueEnd;
+    }
+
+    return issueStart < end && issueEnd > start;
+  }
+
   clear(): void {
     closeCard();
     for (const mark of this.marks) {
@@ -195,8 +299,12 @@ export class AnnotationManager {
   }
 
   annotate(issues: Issue[]): void {
+    const selectionBefore = this.captureSelection(this.buildNodeMap());
     this.clear();
-    if (issues.length === 0) return;
+    if (issues.length === 0) {
+      this.restoreSelection(selectionBefore, this.buildNodeMap());
+      return;
+    }
 
     const sorted = [...issues].sort((a, b) => b.offset - a.offset);
     const fullText = this.element.innerText || '';
@@ -213,6 +321,10 @@ export class AnnotationManager {
 
       const issueStart = resolvedRange.start;
       const issueEnd = resolvedRange.end;
+
+      if (this.intersectsActiveSelection(issueStart, issueEnd, selectionBefore)) {
+        continue;
+      }
 
       for (const tn of textNodes) {
         if (tn.end <= issueStart || tn.start >= issueEnd) continue;
@@ -267,5 +379,7 @@ export class AnnotationManager {
         break;
       }
     }
+
+    this.restoreSelection(selectionBefore, this.buildNodeMap());
   }
 }
