@@ -30,6 +30,10 @@ export const DEFAULT_HISTORY_SETTINGS: HistorySettings = {
   experimentalHosts: [],
 };
 
+const DISABLED_HISTORY_HOSTS = new Set([
+  'mail.google.com',
+]);
+
 export function normalizeHistorySettings(
   settings?: Partial<HistorySettings> | null,
 ): HistorySettings {
@@ -86,6 +90,16 @@ export function resolveHistoryRuntimeConfig(
   }
 
   const allowAnchoredUi = requestedUiMode === 'field';
+
+  if (DISABLED_HISTORY_HOSTS.has(context.hostname.trim().toLowerCase())) {
+    return {
+      enabled: false,
+      requestedUiMode,
+      allowAnchoredUi: false,
+      debug,
+      reason: 'host-disabled',
+    };
+  }
 
   return {
     enabled: true,

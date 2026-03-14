@@ -37,15 +37,16 @@ describe('history runtime config', () => {
     expect(runtime.reason).toBeNull();
   });
 
-  it('defaults to field mode for new installs on any host', () => {
+  it('disables history on gmail by default', () => {
     const runtime = resolveHistoryRuntimeConfig(
       null,
       { hostname: 'mail.google.com' },
     );
 
-    expect(runtime.enabled).toBe(true);
+    expect(runtime.enabled).toBe(false);
     expect(runtime.requestedUiMode).toBe('field');
-    expect(runtime.allowAnchoredUi).toBe(true);
+    expect(runtime.allowAnchoredUi).toBe(false);
+    expect(runtime.reason).toBe('host-disabled');
   });
 
   it('migrates the legacy hidden page default to field mode', () => {

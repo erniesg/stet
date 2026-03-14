@@ -216,14 +216,18 @@ export class VersionHistoryManager {
         }, { debug: this.runtime.debug });
       }
 
-      this.buildUi();
+      if (this.showUi) {
+        this.buildUi();
+      }
       this.observeDom();
 
       document.addEventListener('focusin', this.handleFocusIn, true);
       document.addEventListener('focusout', this.handleFocusOut, true);
       document.addEventListener('input', this.handleInput, true);
-      document.addEventListener('keydown', this.handleKeyDown, true);
-      document.addEventListener('pointerdown', this.handlePointerDown, true);
+      if (this.showUi) {
+        document.addEventListener('keydown', this.handleKeyDown, true);
+        document.addEventListener('pointerdown', this.handlePointerDown, true);
+      }
       document.addEventListener('visibilitychange', this.handleVisibilityChange, true);
       window.addEventListener('pagehide', this.handlePageHide, true);
       if (this.isFieldMode) {
@@ -244,8 +248,10 @@ export class VersionHistoryManager {
     document.removeEventListener('focusin', this.handleFocusIn, true);
     document.removeEventListener('focusout', this.handleFocusOut, true);
     document.removeEventListener('input', this.handleInput, true);
-    document.removeEventListener('keydown', this.handleKeyDown, true);
-    document.removeEventListener('pointerdown', this.handlePointerDown, true);
+    if (this.showUi) {
+      document.removeEventListener('keydown', this.handleKeyDown, true);
+      document.removeEventListener('pointerdown', this.handlePointerDown, true);
+    }
     document.removeEventListener('visibilitychange', this.handleVisibilityChange, true);
     window.removeEventListener('pagehide', this.handlePageHide, true);
     if (this.isFieldMode) {
@@ -263,7 +269,9 @@ export class VersionHistoryManager {
     }
 
     this.releaseActiveSession('destroy', { clearUi: true, closePanel: false });
-    this.root.remove();
+    if (this.showUi) {
+      this.root.remove();
+    }
     if (historyManager === this) {
       historyManager = null;
     }
@@ -542,7 +550,7 @@ export class VersionHistoryManager {
   }
 
   private async openPanel() {
-    if (!this.activeSession) return;
+    if (!this.showUi || !this.activeSession) return;
 
     this.isPanelOpen = true;
     setManagedVisibility(this.root, true, 'flex');
@@ -560,6 +568,7 @@ export class VersionHistoryManager {
   }
 
   private closePanel() {
+    if (!this.showUi) return;
     this.isPanelOpen = false;
     setManagedVisibility(this.panel, false, 'flex');
     logHistoryEvent('history:close', {}, { debug: this.runtime.debug });
@@ -589,6 +598,8 @@ export class VersionHistoryManager {
   }
 
   private renderButton() {
+    if (!this.showUi) return;
+
     const session = this.activeSession;
     const hasActiveElement = session?.target.element.isConnected ?? false;
 
@@ -621,6 +632,8 @@ export class VersionHistoryManager {
   }
 
   private renderPanel() {
+    if (!this.showUi) return;
+
     const session = this.activeSession;
     if (!session) {
       this.closePanel();
@@ -864,6 +877,8 @@ export class VersionHistoryManager {
   }
 
   private updateFloatingPosition(source: string, log = false) {
+    if (!this.showUi) return;
+
     if (!this.isFieldMode) {
       this.clearFloatingStyles();
       if (log) this.logPosition(source);
@@ -1000,7 +1015,11 @@ export class VersionHistoryManager {
   }
 
   private get isFieldMode(): boolean {
-    return this.runtime.requestedUiMode !== 'off';
+    return this.runtime.requestedUiMode !== 'off' && this.showUi;
+  }
+
+  private get showUi(): boolean {
+    return this.runtime.allowAnchoredUi;
   }
 }
 

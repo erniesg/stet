@@ -36,9 +36,12 @@ import {
   getElapsedMs,
   getHistoryTargetLogData,
   getNow,
+  isHistoryDebugEnabled,
+  isHistoryRuntimeDisabled,
   logHistoryEvent,
   recordHistoryEventRate,
 } from './version-history-debug.js';
+import { resolveHistoryRuntimeConfig } from '../history-settings.js';
 import { isHostAllowed } from '../host-access.js';
 
 const managers = new Map<HTMLElement, AnnotationManager>();
@@ -56,6 +59,7 @@ let checkerInitialized = false;
 let domObserver: MutationObserver | null = null;
 let dictionaryLoadPromise: Promise<string[]> | null = null;
 let historyTrackingRegistered = false;
+let historyFeatureEnabled = true;
 const CHECKER_MARK_SELECTOR = 'stet-mark';
 const INPUT_MUTATION_SUPPRESS_MS = 750;
 const recentInputAt = new WeakMap<HTMLElement, number>();
@@ -118,6 +122,32 @@ async function loadConfig(): Promise<ResolvedStetConfig> {
       });
     });
   } catch { return FALLBACK_CONFIG; }
+}
+
+async function loadHistoryFeatureEnabled(): Promise<boolean> {
+  try {
+    const historySettings = await new Promise<unknown>((resolve, reject) => {
+      chrome.runtime.sendMessage({ type: 'GET_HISTORY_SETTINGS' }, (resp) => {
+        if (chrome.runtime.lastError) {
+          reject(chrome.runtime.lastError);
+          return;
+        }
+
+        resolve(resp?.history ?? null);
+      });
+    });
+
+    return resolveHistoryRuntimeConfig(
+      historySettings as Record<string, unknown> | null,
+      { hostname: window.location.hostname },
+      {
+        disableHistory: isHistoryRuntimeDisabled(),
+        debug: isHistoryDebugEnabled(false),
+      },
+    ).enabled;
+  } catch {
+    return !isHistoryRuntimeDisabled();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -841,23 +871,54 @@ function registerRuntimeHandlers() {
       }
 
       if (message?.type === 'GET_EDITOR_HISTORY_STATE') {
+        if (!historyFeatureEnabled) {
+          sendResponse({
+            ok: false,
+            liveEditorAvailable: false,
+            currentText: '',
+            label: null,
+            record: null,
+          });
+          return false;
+        }
+
         const fieldKey = typeof message.fieldKey === 'string' ? message.fieldKey : '';
         void getEditorHistoryState(fieldKey).then(sendResponse);
         return true;
       }
 
       if (message?.type === 'GET_PAGE_HISTORY_TARGETS') {
+        if (!historyFeatureEnabled) {
+          sendResponse({ activeFieldKey: null, targets: [] });
+          return false;
+        }
+
         void getPageHistoryTargets().then(sendResponse);
         return true;
       }
 
       if (message?.type === 'CAPTURE_EDITOR_SNAPSHOT') {
+        if (!historyFeatureEnabled) {
+          sendResponse({ ok: false, currentText: '' });
+          return false;
+        }
+
         const fieldKey = typeof message.fieldKey === 'string' ? message.fieldKey : '';
         void captureEditorSnapshot(fieldKey).then(sendResponse);
         return true;
       }
 
       if (message?.type === 'RESTORE_EDITOR_SNAPSHOT') {
+        if (!historyFeatureEnabled) {
+          sendResponse({
+            ok: false,
+            currentText: '',
+            state: getPopupIssuesState(),
+            error: 'Version history is disabled on this site.',
+          });
+          return false;
+        }
+
         const fieldKey = typeof message.fieldKey === 'string' ? message.fieldKey : '';
         const snapshotId = typeof message.snapshotId === 'string' ? message.snapshotId : '';
         void restoreEditorSnapshot(fieldKey, snapshotId).then(sendResponse);
@@ -1056,6 +1117,7 @@ export async function initChecker(onDictionaryLoaded?: OnDictionaryLoaded) {
   checkerInitialized = true;
 
   config = await loadConfig();
+  historyFeatureEnabled = await loadHistoryFeatureEnabled();
 
   // Override config packs with whatever is actually registered
   const registered = listPacks().map(p => p.id);
@@ -1084,7 +1146,9 @@ export async function initChecker(onDictionaryLoaded?: OnDictionaryLoaded) {
   discoverEditables();
   observeDOM();
   registerRuntimeHandlers();
-  registerHistoryTracking();
+  if (historyFeatureEnabled) {
+    registerHistoryTracking();
+  }
   activeElement = getTrackedEditable(document.activeElement);
   lastHistoryElement = findHistoryEditable(document.activeElement);
   syncPageState();

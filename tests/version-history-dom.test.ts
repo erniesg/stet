@@ -288,7 +288,7 @@ describe('version history dom integration', () => {
     const editor = document.getElementById('editor') as HTMLElement;
     mockRect(editor);
 
-    const manager = new VersionHistoryManager(createRuntime({ requestedUiMode: 'page', allowAnchoredUi: false }));
+    const manager = new VersionHistoryManager(createRuntime({ requestedUiMode: 'page', allowAnchoredUi: true }));
     manager.init();
 
     editor.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));

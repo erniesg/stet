@@ -2,6 +2,7 @@ import { render } from 'preact';
 import { useEffect, useState } from 'preact/hooks';
 import { diffLines, diffText, type DiffLine } from '../content/version-history-diff.js';
 import type { EditableHistoryRecord, VersionSnapshot } from '../content/version-history-core.js';
+import { normalizeSiteAllowlist } from '../host-access.js';
 import { getHistoryRefreshTarget } from './popup-sync.js';
 
 const COLORS = {
@@ -91,6 +92,8 @@ function Popup() {
   const [role, setRole] = useState('subeditor');
   const [loading, setLoading] = useState(true);
   const [activeTabId, setActiveTabId] = useState<number | null>(null);
+  const [activeHostname, setActiveHostname] = useState<string | null>(null);
+  const [siteAllowlist, setSiteAllowlist] = useState<string[]>([]);
   const [issuesState, setIssuesState] = useState<PopupIssuesState>(EMPTY_ISSUES_STATE);
   const [selectedByField, setSelectedByField] = useState<Record<string, string[]>>({});
   const [issuesError, setIssuesError] = useState<string | null>(null);
@@ -119,6 +122,9 @@ function Popup() {
   const historyLineDiff = selectedSnapshot && historyLiveEditorAvailable
     ? diffLines(historyCurrentText, selectedSnapshot.content)
     : null;
+  const currentSiteScoped = activeHostname
+    ? siteAllowlist.length === 0 || siteAllowlist.some((entry) => activeHostname === entry || activeHostname.endsWith(`.${entry}`))
+    : false;
 
   useEffect(() => {
     chrome.runtime.sendMessage({ type: 'GET_SETTINGS' }, (resp) => {
@@ -130,7 +136,18 @@ function Popup() {
       setLoading(false);
     });
 
+    chrome.runtime.sendMessage({ type: 'GET_RAW_SETTINGS' }, (resp) => {
+      setSiteAllowlist(normalizeSiteAllowlist(resp?.userOverrides?.siteAllowlist));
+    });
+
     loadPageIssues(setIssuesState, setIssuesError, setActiveTabId);
+    withActiveTabInfo((tabId, url) => {
+      setActiveTabId(tabId);
+      setActiveHostname(getHostnameFromTabUrl(url));
+    }, () => {
+      setActiveTabId(null);
+      setActiveHostname(null);
+    });
   }, []);
 
   useEffect(() => {
@@ -254,6 +271,48 @@ function Popup() {
 
   const refreshIssues = () => {
     loadPageIssues(setIssuesState, setIssuesError, setActiveTabId);
+    withActiveTabInfo((tabId, url) => {
+      setActiveTabId(tabId);
+      setActiveHostname(getHostnameFromTabUrl(url));
+    }, () => {
+      setActiveTabId(null);
+      setActiveHostname(null);
+    });
+  };
+
+  const saveSiteAllowlist = (nextAllowlist: string[]) => {
+    setSiteAllowlist(nextAllowlist);
+    chrome.runtime.sendMessage({
+      type: 'UPDATE_USER_OVERRIDES',
+      overrides: { siteAllowlist: nextAllowlist },
+    });
+  };
+
+  const enableOnlyCurrentSite = () => {
+    if (!activeHostname) return;
+    saveSiteAllowlist([activeHostname]);
+    if (activeTabId !== null) chrome.tabs.reload(activeTabId);
+  };
+
+  const addCurrentSiteToAllowlist = () => {
+    if (!activeHostname) return;
+    saveSiteAllowlist([...new Set([...siteAllowlist, activeHostname])]);
+    if (activeTabId !== null) chrome.tabs.reload(activeTabId);
+  };
+
+  const removeCurrentSiteFromAllowlist = () => {
+    if (!activeHostname) return;
+    saveSiteAllowlist(siteAllowlist.filter((entry) => entry !== activeHostname));
+    if (activeTabId !== null) chrome.tabs.reload(activeTabId);
+  };
+
+  const allowEverywhere = () => {
+    saveSiteAllowlist([]);
+    if (activeTabId !== null) chrome.tabs.reload(activeTabId);
+  };
+
+  const openOptions = () => {
+    chrome.runtime.openOptionsPage();
   };
 
   const refreshHistoryForSelected = () => {
@@ -477,6 +536,49 @@ function Popup() {
 
       <div style={styles.helper}>
         Review issues and local version history here.
+      </div>
+
+      <div style={styles.section}>
+        <div style={styles.configRow}>
+          <span style={styles.sectionLabel}>Site Scope</span>
+          <button type="button" style={styles.linkButton} onClick={openOptions}>
+            Options
+          </button>
+        </div>
+        <div style={styles.issueMeta}>
+          {activeHostname
+            ? currentSiteScoped
+              ? `Current site enabled: ${activeHostname}`
+              : `Current site blocked by allowlist: ${activeHostname}`
+            : 'Current site unavailable.'}
+        </div>
+        <div style={styles.issueMeta}>
+          {siteAllowlist.length === 0
+            ? 'Stet currently runs on all sites.'
+            : `Allowlist active: ${siteAllowlist.length} site${siteAllowlist.length === 1 ? '' : 's'}.`}
+        </div>
+        <div style={styles.roleGroup}>
+          {activeHostname && siteAllowlist.length === 0 && (
+            <button type="button" onClick={enableOnlyCurrentSite} style={styles.roleBtn}>
+              <span style={{ fontWeight: '500', fontSize: '12px' }}>Only this site</span>
+            </button>
+          )}
+          {activeHostname && siteAllowlist.length > 0 && !currentSiteScoped && (
+            <button type="button" onClick={addCurrentSiteToAllowlist} style={styles.roleBtn}>
+              <span style={{ fontWeight: '500', fontSize: '12px' }}>Enable here</span>
+            </button>
+          )}
+          {activeHostname && siteAllowlist.length > 0 && currentSiteScoped && (
+            <button type="button" onClick={removeCurrentSiteFromAllowlist} style={styles.roleBtn}>
+              <span style={{ fontWeight: '500', fontSize: '12px' }}>Remove site</span>
+            </button>
+          )}
+          {siteAllowlist.length > 0 && (
+            <button type="button" onClick={allowEverywhere} style={styles.roleBtn}>
+              <span style={{ fontWeight: '500', fontSize: '12px' }}>Allow everywhere</span>
+            </button>
+          )}
+        </div>
       </div>
 
       <div style={styles.section}>
@@ -755,6 +857,31 @@ function loadPageIssues(
     setIssuesState(EMPTY_ISSUES_STATE);
     setIssuesError('Could not find the active tab.');
   });
+}
+
+function withActiveTabInfo(
+  onTab: (tabId: number, url: string | undefined) => void,
+  onMissing?: () => void,
+) {
+  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+    const tab = tabs[0];
+    if (typeof tab?.id === 'number') {
+      onTab(tab.id, tab.url);
+      return;
+    }
+    onMissing?.();
+  });
+}
+
+function getHostnameFromTabUrl(url: string | undefined): string | null {
+  if (!url) return null;
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+    return parsed.hostname;
+  } catch {
+    return null;
+  }
 }
 
 function sendFrameMessage<T>(tabId: number, frameId: number, message: Record<string, unknown>): Promise<T | null> {

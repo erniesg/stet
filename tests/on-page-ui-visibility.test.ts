@@ -108,4 +108,22 @@ describe('on-page UI visibility', () => {
     expect(button.style.display).toBe('flex');
     expect(panel.style.display).toBe('none');
   });
+
+  it('does not mount on-page history UI when the host is popup-only', async () => {
+    const { VersionHistoryManager } = await import('../packages/extension/src/content/version-history-manager.js');
+
+    const manager = new VersionHistoryManager({
+      enabled: true,
+      requestedUiMode: 'field',
+      allowAnchoredUi: false,
+      debug: false,
+      reason: 'host-popup-only',
+    });
+
+    manager.init();
+
+    expect(document.querySelector('.stet-history-root')).toBeNull();
+
+    manager.destroy();
+  });
 });
