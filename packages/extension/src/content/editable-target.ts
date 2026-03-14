@@ -41,6 +41,13 @@ interface HostEditableAdapter {
   supportsRangeReplace: boolean;
 }
 
+export type AnnotationSupportMode = 'inline' | 'panel';
+
+export interface AnnotationSupport {
+  mode: AnnotationSupportMode;
+  reason: string;
+}
+
 interface BTEditorHostApi {
   contentEl?: HTMLElement | null;
   getText?: () => string;
@@ -57,25 +64,42 @@ export function isAnnotatableEditable(element: HTMLElement): boolean {
   return isTopLevelContentEditable(element);
 }
 
-export function supportsInlineAnnotationMarkup(element: HTMLElement): boolean {
+export function getAnnotationSupport(element: HTMLElement): AnnotationSupport {
   if (element instanceof HTMLTextAreaElement || element instanceof HTMLInputElement) {
-    return true;
+    return {
+      mode: 'panel',
+      reason: 'plain-text-control',
+    };
   }
 
-  if (!hasEnabledContentEditable(element)) return false;
+  if (!hasEnabledContentEditable(element)) {
+    return {
+      mode: 'panel',
+      reason: 'not-contenteditable',
+    };
+  }
 
-  const walker = document.createTreeWalker(element, NodeFilter.SHOW_ELEMENT, {
-    acceptNode(node) {
-      if (!(node instanceof HTMLElement)) return NodeFilter.FILTER_SKIP;
-      if (node === element) return NodeFilter.FILTER_SKIP;
-      if (node.tagName === 'BR' || node.tagName === 'STET-MARK') {
-        return NodeFilter.FILTER_SKIP;
-      }
-      return NodeFilter.FILTER_ACCEPT;
-    },
-  });
+  if (getHostEditableAdapter(element)) {
+    return {
+      mode: 'panel',
+      reason: 'host-adapter',
+    };
+  }
 
-  return walker.nextNode() === null;
+  if (hasHostManagedEditorMarker(element)) {
+    return {
+      mode: 'panel',
+      reason: 'host-managed-editor',
+    };
+  }
+
+  return hasSafeInlineAnnotationMarkup(element)
+    ? { mode: 'inline', reason: 'safe-rich-text-dom' }
+    : { mode: 'panel', reason: 'unsupported-rich-text-dom' };
+}
+
+export function supportsInlineAnnotationMarkup(element: HTMLElement): boolean {
+  return getAnnotationSupport(element).mode === 'inline';
 }
 
 export function findAnnotatableEditable(start: EventTarget | null): HTMLElement | null {
@@ -143,7 +167,7 @@ export function getEditableTarget(element: HTMLElement): EditableTarget | null {
       source: identity.source,
       signals: identity.signals,
     },
-    read: () => getHostEditableAdapter(element)?.read() ?? extractText(element),
+    read: () => readEditableText(element),
     write: (text: string) => getHostEditableAdapter(element)?.write(text) ?? replaceEditableText(element, text),
   };
 }
@@ -308,6 +332,10 @@ export function notifyEditableChanged(element: HTMLElement): void {
   dispatchEditableEvents(element);
 }
 
+export function readEditableText(element: HTMLElement): string {
+  return getHostEditableAdapter(element)?.read() ?? extractText(element);
+}
+
 function dispatchEditableEvents(element: HTMLElement) {
   try {
     element.dispatchEvent(new InputEvent('input', {
@@ -337,6 +365,92 @@ function getHostEditableAdapter(element: HTMLElement): HostEditableAdapter | nul
     },
     supportsRangeReplace: false,
   };
+}
+
+const INLINE_ANNOTATION_ALLOWED_TAGS = new Set([
+  'A',
+  'B',
+  'BLOCKQUOTE',
+  'BR',
+  'CODE',
+  'DIV',
+  'EM',
+  'H1',
+  'H2',
+  'H3',
+  'H4',
+  'H5',
+  'H6',
+  'I',
+  'LI',
+  'OL',
+  'P',
+  'PRE',
+  'S',
+  'SMALL',
+  'SPAN',
+  'STET-MARK',
+  'STRONG',
+  'SUB',
+  'SUP',
+  'U',
+  'UL',
+]);
+
+const HOST_MANAGED_EDITOR_PATTERN = /\b(fig-ref|bt-editor|prosemirror|ql-editor|public-drafteditor|drafteditor|lexical|slate|ck-content|mce-content-body|tox-edit-area)\b/i;
+const HOST_MANAGED_ATTRIBUTE_PATTERN = /^(data-offset-key|data-lexical|data-slate|data-block|data-editor)/i;
+
+function hasSafeInlineAnnotationMarkup(element: HTMLElement): boolean {
+  const walker = document.createTreeWalker(element, NodeFilter.SHOW_ELEMENT, {
+    acceptNode(node) {
+      if (!(node instanceof HTMLElement)) return NodeFilter.FILTER_SKIP;
+      if (node === element) return NodeFilter.FILTER_SKIP;
+      return NodeFilter.FILTER_ACCEPT;
+    },
+  });
+
+  let node: Node | null;
+  while ((node = walker.nextNode())) {
+    if (!(node instanceof HTMLElement)) continue;
+    if (node.tagName === 'STET-MARK' || node.tagName === 'BR') continue;
+    if (hasEnabledContentEditable(node)) return false;
+    if (isHostManagedNode(node)) return false;
+    if (!INLINE_ANNOTATION_ALLOWED_TAGS.has(node.tagName)) return false;
+  }
+
+  return true;
+}
+
+function hasHostManagedEditorMarker(element: HTMLElement): boolean {
+  let node: HTMLElement | null = element;
+  let depth = 0;
+
+  while (node && depth < 3) {
+    if (isHostManagedNode(node)) return true;
+    node = node.parentElement;
+    depth += 1;
+  }
+
+  return false;
+}
+
+function isHostManagedNode(element: HTMLElement): boolean {
+  if (element.tagName.includes('-')) return true;
+  if (element.getAttribute('contenteditable') === 'false') return true;
+
+  const markerText = [
+    typeof element.className === 'string' ? element.className : '',
+    element.id,
+    element.getAttribute('data-testid'),
+    element.getAttribute('data-qa'),
+    element.getAttribute('aria-label'),
+  ]
+    .filter((value): value is string => typeof value === 'string' && value.length > 0)
+    .join(' ');
+
+  if (HOST_MANAGED_EDITOR_PATTERN.test(markerText)) return true;
+
+  return [...element.attributes].some((attribute) => HOST_MANAGED_ATTRIBUTE_PATTERN.test(attribute.name));
 }
 
 function toHistoryElement(start: EventTarget | null): HTMLElement | null {
@@ -646,14 +760,22 @@ function buildStableIdentitySignature(
     ['testid', signals.dataTestId],
   ].filter((entry): entry is [string, string | null] => Boolean(entry[1]));
 
+  const strongSemanticParts = semanticParts.filter(([key]) => key !== 'placeholder');
+
   const parts: Array<[string, string | null]> = [['label', signals.label]];
 
   if (semanticParts.length > 0) {
     parts.push(...semanticParts);
-  } else if (signals.id) {
+  }
+
+  if (signals.containerHint) {
+    parts.push(['container', signals.containerHint]);
+  } else if (signals.id && strongSemanticParts.length === 0) {
     parts.push(['id', signals.id]);
-  } else {
-    parts.push(['role', signals.role], ['container', signals.containerHint]);
+  }
+
+  if (semanticParts.length === 0) {
+    parts.push(['role', signals.role]);
   }
 
   const normalizedParts = parts

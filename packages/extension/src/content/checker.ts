@@ -18,11 +18,12 @@ import {
   discoverAnnotatableEditables,
   findAnnotatableEditable,
   findHistoryEditable,
+  getAnnotationSupport,
   getEditableTarget,
   notifyEditableChanged,
+  readEditableText,
   replaceEditableRange,
   replaceEditableText,
-  supportsInlineAnnotationMarkup,
 } from './editable-target.js';
 import { resolveIssueApplyRange } from './issue-range.js';
 import { getReplacementText } from './replacement-text.js';
@@ -108,8 +109,7 @@ async function loadConfig(): Promise<ResolvedStetConfig> {
  * Splits on block elements (p, div, br+br) and newlines.
  * First paragraph treated as headline if short (<100 chars).
  */
-function extractParagraphs(element: HTMLElement): { headline?: string; body: string[] } {
-  const text = extractText(element);
+function extractParagraphs(text: string): { headline?: string; body: string[] } {
   // Split on double newlines (common in contenteditable output)
   const parts = text.split(/\n\n+/).map(s => s.trim()).filter(Boolean);
 
@@ -124,12 +124,11 @@ function extractParagraphs(element: HTMLElement): { headline?: string; body: str
   return { body: parts };
 }
 
-function getIssues(element: HTMLElement): Issue[] {
+function getIssues(element: HTMLElement, text = readEditableText(element)): Issue[] {
   if (!config || !config.enabled) return [];
-  const text = extractText(element);
   if (!text.trim()) return [];
 
-  const { headline, body } = extractParagraphs(element);
+  const { headline, body } = extractParagraphs(text);
   const opts = toCheckOptions(config);
 
   // Use checkDocument for structured checking — per-paragraph limits
@@ -187,7 +186,7 @@ function runCheckAndAnnotate(element: HTMLElement) {
   if (!element.isContentEditable) return;
 
   const startedAt = getNow();
-  const text = extractText(element);
+  const text = readEditableText(element);
   const beforeMarks = element.querySelectorAll(CHECKER_MARK_SELECTOR).length;
 
   logHistoryEvent('checker:pre-check', {
@@ -198,7 +197,7 @@ function runCheckAndAnnotate(element: HTMLElement) {
 
   console.log(`[stet] Checking <${element.tagName.toLowerCase()}> (${text.length} chars)`);
 
-  const issues = getIssues(element);
+  const issues = getIssues(element, text);
   latestIssues.set(element, issues);
 
   logHistoryEvent('checker:post-check', {
@@ -218,7 +217,8 @@ function runCheckAndAnnotate(element: HTMLElement) {
   }
 
   const mgr = getOrCreateManager(element);
-  const canInlineAnnotate = supportsInlineAnnotationMarkup(element);
+  const annotationSupport = getAnnotationSupport(element);
+  const canInlineAnnotate = annotationSupport.mode === 'inline';
 
   logHistoryEvent('checker:pre-annotate', {
     ...getCheckerElementLogData(element),
@@ -236,7 +236,7 @@ function runCheckAndAnnotate(element: HTMLElement) {
       logHistoryEvent('checker:inline-annotations-skip', {
         ...getCheckerElementLogData(element),
         issueCount: issues.length,
-        reason: 'complex-contenteditable-dom',
+        reason: annotationSupport.reason,
       });
     }
   } finally {
@@ -422,7 +422,7 @@ async function applySelectedFixes(element: HTMLElement, selectedIssueKeys: strin
   if (issues.length === 0) return 0;
   const target = getEditableTarget(element);
 
-  let text = extractText(element);
+  let text = readEditableText(element);
   let applied = 0;
   let nextLockedStart = Number.POSITIVE_INFINITY;
 
@@ -511,7 +511,7 @@ async function getEditorHistoryState(fieldKey: string): Promise<{
   return {
     ok: true,
     liveEditorAvailable: true,
-    currentText: extractText(element),
+    currentText: target.read(),
     label: getPopupElementLabel(element),
     record: await loadHistoryRecordForTarget(target),
   };
@@ -531,7 +531,7 @@ async function captureEditorSnapshot(fieldKey: string): Promise<{
     return { ok: false, currentText: '' };
   }
 
-  const currentText = extractText(element);
+  const currentText = target.read();
   await saveSnapshotForTarget(target, currentText, 'manual', DEFAULT_HISTORY_POLICY, true);
   return { ok: true, currentText };
 }
@@ -558,7 +558,7 @@ async function restoreEditorSnapshot(
   const record = await loadHistoryRecordForTarget(target);
   const snapshot = record?.snapshots.find((entry) => entry.id === snapshotId);
   if (!snapshot) {
-    return { ok: false, currentText: extractText(element), state: getPopupIssuesState() };
+    return { ok: false, currentText: target.read(), state: getPopupIssuesState() };
   }
 
   const startedAt = getNow();
