@@ -440,9 +440,6 @@ export class AnnotationManager {
 
   private dismissIssue(issue: Issue): void {
     this.dismissedIssueKeys.add(getIssueKey(issue));
-    if (issue.fingerprint) {
-      this.dismissedFingerprints.add(issue.fingerprint);
-    }
   }
 
   private dismissIssueFamily(fingerprint: string): void {

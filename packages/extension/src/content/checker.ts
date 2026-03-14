@@ -247,10 +247,6 @@ function publishElementIssues(element: HTMLElement, issues: Issue[]) {
 function dismissIssueFromConnectedUi(element: HTMLElement, issue: Issue) {
   recentInputAt.set(element, getNow());
   getIgnoredIssueKeySet(element).add(getIssueSelectionKey(issue));
-  if (issue.fingerprint) {
-    getIgnoredIssueFingerprintSet(element).add(issue.fingerprint);
-  }
-
   publishElementIssues(element, filterIgnoredIssues(element, latestIssues.get(element) ?? []));
 }
 
@@ -330,7 +326,7 @@ function runCheckAndAnnotate(element: HTMLElement) {
       });
     }
   } finally {
-    requestAnimationFrame(() => { selfMutating = false; });
+    window.setTimeout(() => { selfMutating = false; }, 0);
   }
 
   logHistoryEvent('checker:run', {

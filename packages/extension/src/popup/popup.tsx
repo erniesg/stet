@@ -2,6 +2,7 @@ import { render } from 'preact';
 import { useEffect, useState } from 'preact/hooks';
 import { diffLines, diffText, type DiffLine } from '../content/version-history-diff.js';
 import type { EditableHistoryRecord, VersionSnapshot } from '../content/version-history-core.js';
+import { getHistoryRefreshTarget } from './popup-sync.js';
 
 const COLORS = {
   primary: '#6366f1',
@@ -137,17 +138,21 @@ function Popup() {
       message: { type?: string; tabId?: number; state?: PopupIssuesState },
     ) => {
       if (message?.type !== 'TAB_ISSUES_UPDATED') return;
+      const historyRefreshTarget = getHistoryRefreshTarget(activeTabId, message.tabId, selectedHistoryTarget);
       if (activeTabId === null || message.tabId !== activeTabId) return;
       setIssuesState(message.state ?? EMPTY_ISSUES_STATE);
       setIssuesError(null);
       void refreshHistoryTargets(message.tabId, message.state ?? EMPTY_ISSUES_STATE);
+      if (historyRefreshTarget) {
+        void refreshHistory(message.tabId, historyRefreshTarget.frameId, historyRefreshTarget.fieldKey);
+      }
     };
 
     chrome.runtime.onMessage.addListener(handleMessage);
     return () => {
       chrome.runtime.onMessage.removeListener(handleMessage);
     };
-  }, [activeTabId]);
+  }, [activeTabId, selectedHistoryTarget?.frameId, selectedHistoryTarget?.fieldKey]);
 
   useEffect(() => {
     if (activeTabId === null) {
@@ -192,6 +197,9 @@ function Popup() {
       loadPageIssues(setIssuesState, setIssuesError, setActiveTabId);
       if (activeTabId !== null) {
         void refreshHistoryTargets(activeTabId, issuesState);
+        if (selectedHistoryTarget) {
+          void refreshHistory(activeTabId, selectedHistoryTarget.frameId, selectedHistoryTarget.fieldKey);
+        }
       }
     };
 
@@ -201,7 +209,7 @@ function Popup() {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('focus', handleVisibilityChange);
     };
-  }, [activeTabId, issuesState]);
+  }, [activeTabId, issuesState, selectedHistoryTarget?.frameId, selectedHistoryTarget?.fieldKey]);
 
   useEffect(() => {
     if (!activeTargetKey) return;
