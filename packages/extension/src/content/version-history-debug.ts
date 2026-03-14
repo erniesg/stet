@@ -92,7 +92,7 @@ export function logHistoryEvent(
   if (!options.debug) return;
 
   const consoleMethod = options.level === 'warn' ? console.warn : console.debug;
-  consoleMethod(`[stet] ${event}`, data);
+  consoleMethod(formatDebugConsoleMessage(event, data));
 }
 
 export function recordHistoryEventRate(
@@ -271,4 +271,50 @@ function roundMs(value: number): number {
 
 function roundPx(value: number): number {
   return Math.round(value * 10) / 10;
+}
+
+function formatDebugConsoleMessage(event: string, data: Record<string, unknown>): string {
+  const summary = getDebugEventSummary(event, data);
+  return summary ? `[stet] ${event} ${summary}` : `[stet] ${event}`;
+}
+
+function getDebugEventSummary(event: string, data: Record<string, unknown>): string | null {
+  if (event === 'page:debug') {
+    const pageEventType = typeof data.pageEventType === 'string' ? data.pageEventType : 'unknown';
+    const payload = typeof data.payload === 'object' && data.payload !== null
+      ? data.payload as Record<string, unknown>
+      : null;
+    const payloadMessage = getPageDebugPayloadMessage(payload);
+    return payloadMessage ? `${pageEventType} ${payloadMessage}` : pageEventType;
+  }
+
+  if (typeof data.message === 'string' && data.message.trim().length > 0) {
+    return data.message.trim();
+  }
+
+  return null;
+}
+
+function getPageDebugPayloadMessage(payload: Record<string, unknown> | null): string | null {
+  if (!payload) return null;
+
+  const args = Array.isArray(payload.args) ? payload.args : [];
+  for (const value of args) {
+    if (typeof value === 'string' && value.trim().length > 0) {
+      return value.trim();
+    }
+
+    if (typeof value === 'object' && value !== null) {
+      const objectValue = value as Record<string, unknown>;
+      if (typeof objectValue.message === 'string' && objectValue.message.trim().length > 0) {
+        return objectValue.message.trim();
+      }
+    }
+  }
+
+  if (typeof payload.message === 'string' && payload.message.trim().length > 0) {
+    return payload.message.trim();
+  }
+
+  return null;
 }

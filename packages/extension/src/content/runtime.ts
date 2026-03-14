@@ -103,6 +103,17 @@ function getIsolationMode(): 'all' | 'checker' | 'history' | 'none' {
   return 'all';
 }
 
+export function shouldInstallPageDebugBridge(): boolean {
+  if (window.__stetTraceCollectorEnabled === true) return true;
+  if (isHistoryDebugEnabled(false)) return true;
+
+  try {
+    return new URLSearchParams(window.location.search).has('stetDebug');
+  } catch {
+    return false;
+  }
+}
+
 async function startContentRuntime(
   runtime: NonNullable<Window['__stetContentRuntime']>,
   options: ContentRuntimeOptions,
@@ -129,8 +140,10 @@ async function startContentRuntime(
     isolation,
   });
   registerGlobalHistoryCrashHandlers();
-  registerPageDebugRelay();
-  injectPageDebugBridge();
+  if (shouldInstallPageDebugBridge()) {
+    registerPageDebugRelay();
+    injectPageDebugBridge();
+  }
   options.registerPacks?.();
 
   const runChecker = isolation === 'all' || isolation === 'checker';
@@ -189,7 +202,7 @@ function registerPageDebugRelay() {
     };
 
     logHistoryEvent('page:debug', payload, {
-      debug: true,
+      debug: shouldInstallPageDebugBridge(),
       level: event.data.type === 'console-error' || event.data.type === 'window-error'
         ? 'warn'
         : 'debug',

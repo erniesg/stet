@@ -325,9 +325,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         });
 
         if (event.pageEventType === 'console-error' || event.pageEventType === 'window-error') {
-          console.error('[Stet/page]', event);
+          console.error(formatPageDebugConsoleMessage(event));
         } else {
-          console.warn('[Stet/page]', event);
+          console.warn(formatPageDebugConsoleMessage(event));
         }
 
         appendTraceEntry({
@@ -527,3 +527,32 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       break;
   }
 });
+
+function formatPageDebugConsoleMessage(event: PageDebugEvent): string {
+  const message = getPageDebugMessage(event.payload);
+  return message
+    ? `[Stet/page] ${event.pageEventType} ${message}`
+    : `[Stet/page] ${event.pageEventType}`;
+}
+
+function getPageDebugMessage(payload: Record<string, unknown>): string | null {
+  const args = Array.isArray(payload.args) ? payload.args : [];
+  for (const value of args) {
+    if (typeof value === 'string' && value.trim().length > 0) {
+      return value.trim();
+    }
+
+    if (typeof value === 'object' && value !== null) {
+      const objectValue = value as Record<string, unknown>;
+      if (typeof objectValue.message === 'string' && objectValue.message.trim().length > 0) {
+        return objectValue.message.trim();
+      }
+    }
+  }
+
+  if (typeof payload.message === 'string' && payload.message.trim().length > 0) {
+    return payload.message.trim();
+  }
+
+  return null;
+}
