@@ -82,6 +82,7 @@ const EMPTY_TAB_ISSUES: TabIssueState = {
 };
 
 const tabIssueStates = new Map<number, Map<number, FrameIssueState>>();
+const TAB_ISSUE_STORAGE_PREFIX = 'stet:tab:issues:';
 const historyDebugKeysByTab = new Map<number, Set<string>>();
 const HISTORY_DEBUG_STORAGE_PREFIX = 'stet:history:debug:';
 const HISTORY_DEBUG_LATEST_KEY = 'stet:history:debug:last';
@@ -91,6 +92,14 @@ const TRACE_MAX_ENTRIES = 2000;
 const TRACE_FILE_ENDPOINT = 'http://127.0.0.1:5123/trace';
 let traceEntriesCache: TraceEventEntry[] | null = null;
 let traceWriteChain: Promise<void> = Promise.resolve();
+
+function getIssueStateStorageArea(): chrome.storage.StorageArea {
+  return chrome.storage.session ?? chrome.storage.local;
+}
+
+function getTabIssueStorageKey(tabId: number): string {
+  return `${TAB_ISSUE_STORAGE_PREFIX}${tabId}`;
+}
 
 function setBadgeForTab(tabId: number, count: number) {
   chrome.action.setBadgeText({ text: count > 0 ? String(count) : '', tabId });
@@ -119,6 +128,79 @@ function getFrameStates(tabId: number): Map<number, FrameIssueState> {
     tabIssueStates.set(tabId, states);
   }
   return states;
+}
+
+function normalizeFrameIssueState(raw: unknown): FrameIssueState | null {
+  if (typeof raw !== 'object' || raw === null) return null;
+
+  const candidate = raw as Partial<FrameIssueState>;
+  return {
+    enabled: Boolean(candidate.enabled),
+    totalIssues: Number(candidate.totalIssues) || 0,
+    editorCount: Number(candidate.editorCount) || 0,
+    activeFieldKey: typeof candidate.activeFieldKey === 'string' ? candidate.activeFieldKey : null,
+    activeLabel: typeof candidate.activeLabel === 'string' ? candidate.activeLabel : null,
+    issues: Array.isArray(candidate.issues) ? candidate.issues : [],
+    updatedAt: Number(candidate.updatedAt) || 0,
+  };
+}
+
+function serializeFrameStates(states: Map<number, FrameIssueState>): Record<string, FrameIssueState> {
+  const serialized: Record<string, FrameIssueState> = {};
+  for (const [frameId, state] of states) {
+    serialized[String(frameId)] = state;
+  }
+  return serialized;
+}
+
+async function persistTabIssueState(tabId: number): Promise<void> {
+  const states = tabIssueStates.get(tabId);
+  const storage = getIssueStateStorageArea();
+  const storageKey = getTabIssueStorageKey(tabId);
+
+  if (!states || states.size === 0) {
+    await new Promise<void>((resolve) => {
+      storage.remove(storageKey, () => resolve());
+    });
+    return;
+  }
+
+  await new Promise<void>((resolve) => {
+    storage.set({
+      [storageKey]: serializeFrameStates(states),
+    }, () => resolve());
+  });
+}
+
+async function loadPersistedTabIssueState(tabId: number): Promise<Map<number, FrameIssueState>> {
+  const existing = tabIssueStates.get(tabId);
+  if (existing && existing.size > 0) return existing;
+
+  const storageKey = getTabIssueStorageKey(tabId);
+  const storage = getIssueStateStorageArea();
+
+  const stored = await new Promise<Record<string, unknown>>((resolve) => {
+    storage.get(storageKey, (result) => resolve(result));
+  });
+
+  const rawStates = stored[storageKey];
+  const hydrated = new Map<number, FrameIssueState>();
+
+  if (typeof rawStates === 'object' && rawStates !== null) {
+    for (const [frameId, state] of Object.entries(rawStates as Record<string, unknown>)) {
+      const normalized = normalizeFrameIssueState(state);
+      const parsedFrameId = Number(frameId);
+      if (!normalized || !Number.isInteger(parsedFrameId)) continue;
+      hydrated.set(parsedFrameId, normalized);
+    }
+  }
+
+  if (hydrated.size > 0) {
+    tabIssueStates.set(tabId, hydrated);
+    return hydrated;
+  }
+
+  return getFrameStates(tabId);
 }
 
 function pickPreferredFrame(states: Map<number, FrameIssueState>): [number, FrameIssueState] | null {
@@ -184,12 +266,14 @@ function getTabIssueState(tabId: number): TabIssueState {
 function syncBadgeFromState(tabId: number) {
   setBadgeForTab(tabId, getTabIssueState(tabId).totalIssues);
   broadcastTabIssueState(tabId);
+  void persistTabIssueState(tabId);
 }
 
 function clearTabIssueState(tabId: number) {
   tabIssueStates.delete(tabId);
   setBadgeForTab(tabId, 0);
   broadcastTabIssueState(tabId);
+  void persistTabIssueState(tabId);
 }
 
 function getHistoryDebugStorageKey(tabId: number, frameId: number): string {
@@ -211,6 +295,85 @@ function clearHistoryDebugBuffers(tabId: number) {
 
   chrome.storage.local.remove([...keys]);
   historyDebugKeysByTab.delete(tabId);
+}
+
+function getRefreshFrameIds(tabId: number): number[] {
+  const states = tabIssueStates.get(tabId);
+  const orderedFrameIds = states
+    ? [...states.entries()]
+      .sort((left, right) => {
+        const rankDelta = getFrameRank(right[1]) - getFrameRank(left[1]);
+        if (rankDelta !== 0) return rankDelta;
+        return right[1].updatedAt - left[1].updatedAt;
+      })
+      .map(([frameId]) => frameId)
+    : [];
+
+  if (!orderedFrameIds.includes(0)) {
+    orderedFrameIds.push(0);
+  }
+
+  return orderedFrameIds.length > 0 ? orderedFrameIds : [0];
+}
+
+function requestFrameIssueState(tabId: number, frameId: number): Promise<FrameIssueState | null> {
+  return new Promise((resolve) => {
+    chrome.tabs.sendMessage(
+      tabId,
+      { type: 'GET_PAGE_ISSUES' },
+      { frameId },
+      (resp) => {
+        if (chrome.runtime.lastError) {
+          resolve(null);
+          return;
+        }
+
+        const normalized = normalizeFrameIssueState(resp);
+        if (!normalized) {
+          resolve(null);
+          return;
+        }
+
+        resolve({
+          ...normalized,
+          updatedAt: Date.now(),
+        });
+      },
+    );
+  });
+}
+
+async function refreshTabIssueState(tabId: number): Promise<TabIssueState> {
+  await loadPersistedTabIssueState(tabId);
+  const frameIds = getRefreshFrameIds(tabId);
+  const failedFrameIds: number[] = [];
+  let refreshed = false;
+
+  for (const frameId of frameIds) {
+    const state = await requestFrameIssueState(tabId, frameId);
+    if (!state) {
+      failedFrameIds.push(frameId);
+      continue;
+    }
+
+    getFrameStates(tabId).set(frameId, state);
+    refreshed = true;
+  }
+
+  if (refreshed && failedFrameIds.length > 0) {
+    const states = getFrameStates(tabId);
+    for (const frameId of failedFrameIds) {
+      states.delete(frameId);
+    }
+  }
+
+  if (refreshed) {
+    syncBadgeFromState(tabId);
+    return getTabIssueState(tabId);
+  }
+
+  await loadPersistedTabIssueState(tabId);
+  return getTabIssueState(tabId);
 }
 
 function loadTraceEntries(): Promise<TraceEventEntry[]> {
@@ -444,14 +607,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const tabId = sender.tab.id;
         const frameId = sender.frameId ?? 0;
         getFrameStates(tabId).set(frameId, {
-          enabled: Boolean(message.state?.enabled),
-          totalIssues: Number(message.state?.totalIssues) || 0,
-          editorCount: Number(message.state?.editorCount) || 0,
-          activeFieldKey: typeof message.state?.activeFieldKey === 'string' ? message.state.activeFieldKey : null,
-          activeLabel: typeof message.state?.activeLabel === 'string' ? message.state.activeLabel : null,
-          issues: Array.isArray(message.state?.issues) ? message.state.issues : [],
+          ...(normalizeFrameIssueState(message.state) ?? {
+            enabled: false,
+            totalIssues: 0,
+            editorCount: 0,
+            activeFieldKey: null,
+            activeLabel: null,
+            issues: [],
+            updatedAt: 0,
+          }),
           updatedAt: Date.now(),
-        });
+        } satisfies FrameIssueState);
         syncBadgeFromState(tabId);
       }
       sendResponse({ ok: true });
@@ -459,8 +625,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     case 'GET_TAB_ISSUES':
       if (typeof message.tabId === 'number') {
-        sendResponse(getTabIssueState(message.tabId));
-        return false;
+        void loadPersistedTabIssueState(message.tabId).then(() => {
+          sendResponse(getTabIssueState(message.tabId));
+        });
+        return true;
+      }
+      sendResponse(EMPTY_TAB_ISSUES);
+      return false;
+
+    case 'REFRESH_TAB_ISSUES':
+      if (typeof message.tabId === 'number') {
+        void refreshTabIssueState(message.tabId).then(sendResponse);
+        return true;
       }
       sendResponse(EMPTY_TAB_ISSUES);
       return false;

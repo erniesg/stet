@@ -639,7 +639,7 @@ function loadPageIssues(
 ) {
   withActiveTab((tabId) => {
     setActiveTabId?.(tabId);
-    chrome.runtime.sendMessage({ type: 'GET_TAB_ISSUES', tabId }, (resp) => {
+    chrome.runtime.sendMessage({ type: 'REFRESH_TAB_ISSUES', tabId }, (resp) => {
       if (chrome.runtime.lastError) {
         setIssuesState(EMPTY_ISSUES_STATE);
         setIssuesError('Could not read issues from this page yet.');
