@@ -18,6 +18,10 @@ function copyExtensionAssets() {
         resolve(__dirname, '..', '..', 'data', 'wordlist-en.txt'),
         resolve(dist, 'wordlist-en.txt'),
       );
+      copyFileSync(
+        resolve(__dirname, 'src/content/page-debug-bridge.js'),
+        resolve(dist, 'page-debug-bridge.js'),
+      );
 
       const iconsDir = resolve(dist, 'assets/icons');
       if (!existsSync(iconsDir)) {

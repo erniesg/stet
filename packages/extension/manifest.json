@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "description": "Inline style checking for web text editors with pluggable rule packs",
   "permissions": ["storage", "activeTab"],
+  "host_permissions": ["<all_urls>"],
   "action": {
     "default_popup": "popup.html",
     "default_icon": {
@@ -20,15 +21,13 @@
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "all_frames": true,
-      "match_about_blank": true,
       "js": ["content.js"],
       "css": ["annotations.css"]
     }
   ],
   "web_accessible_resources": [
     {
-      "resources": ["wordlist-en.txt"],
+      "resources": ["wordlist-en.txt", "page-debug-bridge.js"],
       "matches": ["<all_urls>"]
     }
   ],

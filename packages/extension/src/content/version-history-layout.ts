@@ -14,6 +14,7 @@ export interface FieldHistoryLayoutInput {
   panelWidth: number;
   panelHeight: number;
   panelOpen: boolean;
+  obstacles?: HistoryLayoutRect[];
   padding?: number;
   gap?: number;
 }
@@ -29,13 +30,14 @@ export interface FieldHistoryLayout {
     top: number;
     left: number;
     width: number;
-    placement: 'above' | 'below';
+    placement: 'above' | 'below' | 'left' | 'right';
   };
 }
 
 export function computeFieldHistoryLayout(input: FieldHistoryLayoutInput): FieldHistoryLayout {
   const padding = input.padding ?? 8;
   const gap = input.gap ?? 8;
+  const obstacles = input.obstacles ?? [];
   const viewportWidth = Math.max(0, input.viewportWidth);
   const viewportHeight = Math.max(0, input.viewportHeight);
 
@@ -56,12 +58,27 @@ export function computeFieldHistoryLayout(input: FieldHistoryLayoutInput): Field
     };
   }
 
-  const chipLeft = clampPosition(targetRight - chipWidth, chipWidth, viewportWidth, padding);
-  const chipTopAbove = input.targetRect.top - chipHeight - gap;
-  const chipTopBelow = targetBottom + gap;
-  const chipTop = chipTopAbove >= padding
-    ? chipTopAbove
-    : clampPosition(chipTopBelow, chipHeight, viewportHeight, padding);
+  const chipCandidates = buildChipCandidates({
+    targetRect: input.targetRect,
+    viewportWidth,
+    viewportHeight,
+    chipWidth,
+    chipHeight,
+    padding,
+    gap,
+    obstacles,
+  });
+  const chip = chipCandidates.find((candidate) => candidate.targetOverlapArea === 0 && candidate.obstacleOverlapArea === 0) ??
+    [...chipCandidates].sort((leftCandidate, rightCandidate) => {
+      if (leftCandidate.targetOverlapArea !== rightCandidate.targetOverlapArea) {
+        return leftCandidate.targetOverlapArea - rightCandidate.targetOverlapArea;
+      }
+      if (leftCandidate.obstacleOverlapArea !== rightCandidate.obstacleOverlapArea) {
+        return leftCandidate.obstacleOverlapArea - rightCandidate.obstacleOverlapArea;
+      }
+      return leftCandidate.preference - rightCandidate.preference;
+    })[0];
+  const chipAboveTarget = chip.top + chipHeight <= input.targetRect.top;
 
   const panelLeft = clampPosition(
     Math.max(input.targetRect.left, targetRight - panelWidth),
@@ -69,30 +86,197 @@ export function computeFieldHistoryLayout(input: FieldHistoryLayoutInput): Field
     viewportWidth,
     padding,
   );
-
-  const belowTop = chipTop + chipHeight + gap;
-  const aboveTop = chipTop - panelHeight - gap;
-  const fitsBelow = belowTop + panelHeight <= viewportHeight - padding;
-  const fitsAbove = aboveTop >= padding;
-  const placement = input.panelOpen && !fitsBelow && fitsAbove ? 'above' : 'below';
-  const panelTop = placement === 'above'
-    ? aboveTop
-    : clampPosition(belowTop, panelHeight, viewportHeight, padding);
+  const orderedPlacements = chipAboveTarget
+    ? ['below', 'above', 'right', 'left'] as const
+    : ['above', 'below', 'right', 'left'] as const;
+  const candidates = orderedPlacements.map((placement, preference) =>
+    buildPanelCandidate({
+      placement,
+      targetRect: input.targetRect,
+      viewportWidth,
+      viewportHeight,
+      panelWidth,
+      panelHeight,
+      padding,
+      gap,
+      obstacles,
+      preferredLeft: panelLeft,
+    }, preference),
+  );
+  const chosen = candidates.find((candidate) => candidate.targetOverlapArea === 0 && candidate.obstacleOverlapArea === 0) ??
+    [...candidates].sort((leftCandidate, rightCandidate) => {
+      if (leftCandidate.targetOverlapArea !== rightCandidate.targetOverlapArea) {
+        return leftCandidate.targetOverlapArea - rightCandidate.targetOverlapArea;
+      }
+      if (leftCandidate.obstacleOverlapArea !== rightCandidate.obstacleOverlapArea) {
+        return leftCandidate.obstacleOverlapArea - rightCandidate.obstacleOverlapArea;
+      }
+      return leftCandidate.preference - rightCandidate.preference;
+    })[0];
 
   return {
     visible: true,
     chip: {
-      top: round(chipTop),
-      left: round(chipLeft),
+      top: round(chip.top),
+      left: round(chip.left),
       width: round(chipWidth),
     },
     panel: {
-      top: round(panelTop),
-      left: round(panelLeft),
+      top: round(chosen.top),
+      left: round(chosen.left),
       width: round(panelWidth),
-      placement,
+      placement: chosen.placement,
     },
   };
+}
+
+interface PanelCandidateInput {
+  placement: FieldHistoryLayout['panel']['placement'];
+  targetRect: HistoryLayoutRect;
+  viewportWidth: number;
+  viewportHeight: number;
+  panelWidth: number;
+  panelHeight: number;
+  padding: number;
+  gap: number;
+  obstacles: HistoryLayoutRect[];
+  preferredLeft: number;
+}
+
+interface PanelCandidate {
+  placement: FieldHistoryLayout['panel']['placement'];
+  top: number;
+  left: number;
+  targetOverlapArea: number;
+  obstacleOverlapArea: number;
+  preference: number;
+}
+
+interface ChipCandidate {
+  top: number;
+  left: number;
+  targetOverlapArea: number;
+  obstacleOverlapArea: number;
+  preference: number;
+}
+
+function buildPanelCandidate(
+  input: PanelCandidateInput,
+  preference: number,
+): PanelCandidate {
+  const targetBottom = input.targetRect.top + input.targetRect.height;
+  const targetRight = input.targetRect.left + input.targetRect.width;
+
+  const top = input.placement === 'below'
+    ? clampPosition(targetBottom + input.gap, input.panelHeight, input.viewportHeight, input.padding)
+    : input.placement === 'above'
+      ? clampPosition(
+        input.targetRect.top - input.panelHeight - input.gap,
+        input.panelHeight,
+        input.viewportHeight,
+        input.padding,
+      )
+      : clampPosition(input.targetRect.top, input.panelHeight, input.viewportHeight, input.padding);
+
+  const left = input.placement === 'right'
+    ? clampPosition(targetRight + input.gap, input.panelWidth, input.viewportWidth, input.padding)
+    : input.placement === 'left'
+      ? clampPosition(
+        input.targetRect.left - input.panelWidth - input.gap,
+        input.panelWidth,
+        input.viewportWidth,
+        input.padding,
+      )
+      : input.preferredLeft;
+
+  return {
+    placement: input.placement,
+    top,
+    left,
+    targetOverlapArea: computeOverlapArea(
+      input.targetRect,
+      {
+        top,
+        left,
+        width: input.panelWidth,
+        height: input.panelHeight,
+      },
+    ),
+    obstacleOverlapArea: computeTotalOverlapArea(
+      {
+        top,
+        left,
+        width: input.panelWidth,
+        height: input.panelHeight,
+      },
+      input.obstacles,
+    ),
+    preference,
+  };
+}
+
+interface ChipCandidateInput {
+  targetRect: HistoryLayoutRect;
+  viewportWidth: number;
+  viewportHeight: number;
+  chipWidth: number;
+  chipHeight: number;
+  padding: number;
+  gap: number;
+  obstacles: HistoryLayoutRect[];
+}
+
+function buildChipCandidates(input: ChipCandidateInput): ChipCandidate[] {
+  const targetRight = input.targetRect.left + input.targetRect.width;
+  const targetBottom = input.targetRect.top + input.targetRect.height;
+  const verticalCandidates = [
+    {
+      top: clampPosition(input.targetRect.top - input.chipHeight - input.gap, input.chipHeight, input.viewportHeight, input.padding),
+      preference: 0,
+    },
+    {
+      top: clampPosition(targetBottom + input.gap, input.chipHeight, input.viewportHeight, input.padding),
+      preference: 1,
+    },
+  ];
+  const horizontalCandidates = [
+    {
+      left: clampPosition(targetRight - input.chipWidth, input.chipWidth, input.viewportWidth, input.padding),
+      preference: 0,
+    },
+    {
+      left: clampPosition(
+        input.targetRect.left + (input.targetRect.width - input.chipWidth) / 2,
+        input.chipWidth,
+        input.viewportWidth,
+        input.padding,
+      ),
+      preference: 1,
+    },
+    {
+      left: clampPosition(input.targetRect.left, input.chipWidth, input.viewportWidth, input.padding),
+      preference: 2,
+    },
+  ];
+
+  return verticalCandidates.flatMap((verticalCandidate) => {
+    return horizontalCandidates.map((horizontalCandidate) => {
+      const rect = {
+        top: verticalCandidate.top,
+        left: horizontalCandidate.left,
+        width: input.chipWidth,
+        height: input.chipHeight,
+      };
+
+      return {
+        top: verticalCandidate.top,
+        left: horizontalCandidate.left,
+        targetOverlapArea: computeOverlapArea(input.targetRect, rect),
+        obstacleOverlapArea: computeTotalOverlapArea(rect, input.obstacles),
+        preference: verticalCandidate.preference * horizontalCandidates.length + horizontalCandidate.preference,
+      };
+    });
+  });
 }
 
 function isTargetVisible(
@@ -127,4 +311,28 @@ function clampPosition(value: number, size: number, viewportSize: number, paddin
 
 function round(value: number): number {
   return Math.round(value * 10) / 10;
+}
+
+function computeOverlapArea(leftRect: HistoryLayoutRect, rightRect: HistoryLayoutRect): number {
+  const overlapWidth = Math.min(
+    leftRect.left + leftRect.width,
+    rightRect.left + rightRect.width,
+  ) - Math.max(leftRect.left, rightRect.left);
+  const overlapHeight = Math.min(
+    leftRect.top + leftRect.height,
+    rightRect.top + rightRect.height,
+  ) - Math.max(leftRect.top, rightRect.top);
+
+  if (overlapWidth <= 0 || overlapHeight <= 0) return 0;
+  return overlapWidth * overlapHeight;
+}
+
+function computeTotalOverlapArea(rect: HistoryLayoutRect, obstacles: HistoryLayoutRect[]): number {
+  let total = 0;
+
+  for (const obstacle of obstacles) {
+    total += computeOverlapArea(rect, obstacle);
+  }
+
+  return total;
 }

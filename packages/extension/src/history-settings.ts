@@ -1,3 +1,5 @@
+import { isHostAllowed } from './host-access.js';
+
 export type HistoryUiMode = 'off' | 'page' | 'field';
 
 export interface HistorySettings {
@@ -23,19 +25,22 @@ export interface HistoryRuntimeOverrides {
 
 export const DEFAULT_HISTORY_SETTINGS: HistorySettings = {
   enabled: true,
-  uiMode: 'page',
+  uiMode: 'field',
   debug: false,
-  experimentalHosts: ['localhost', '127.0.0.1'],
+  experimentalHosts: [],
 };
 
 export function normalizeHistorySettings(
   settings?: Partial<HistorySettings> | null,
 ): HistorySettings {
+  const debug = settings?.debug ?? DEFAULT_HISTORY_SETTINGS.debug;
+  const experimentalHosts = normalizeHosts(settings?.experimentalHosts);
+
   return {
     enabled: settings?.enabled ?? DEFAULT_HISTORY_SETTINGS.enabled,
-    uiMode: normalizeUiMode(settings?.uiMode),
-    debug: settings?.debug ?? DEFAULT_HISTORY_SETTINGS.debug,
-    experimentalHosts: normalizeHosts(settings?.experimentalHosts),
+    uiMode: normalizeStoredUiMode(settings?.uiMode, debug),
+    debug,
+    experimentalHosts,
   };
 }
 
@@ -70,38 +75,46 @@ export function resolveHistoryRuntimeConfig(
     };
   }
 
-  const allowAnchoredUi =
-    requestedUiMode === 'field' &&
-    normalized.experimentalHosts.includes(context.hostname.trim().toLowerCase());
+  if (!isHostAllowed(context.hostname, normalized.experimentalHosts)) {
+    return {
+      enabled: false,
+      requestedUiMode,
+      allowAnchoredUi: false,
+      debug,
+      reason: 'host-not-allowed',
+    };
+  }
+
+  const allowAnchoredUi = requestedUiMode === 'field';
 
   return {
     enabled: true,
     requestedUiMode,
     allowAnchoredUi,
     debug,
-    reason:
-      requestedUiMode === 'field' && !allowAnchoredUi
-        ? 'field-ui-host-blocked'
-        : null,
+    reason: null,
   };
 }
 
 function normalizeUiMode(value: HistoryUiMode | undefined): HistoryUiMode {
-  if (value === 'off' || value === 'field' || value === 'page') return value;
+  if (value === 'off' || value === 'field') return value;
+  if (value === 'page') return 'field';
   return DEFAULT_HISTORY_SETTINGS.uiMode;
 }
 
 function normalizeHosts(value: string[] | undefined): string[] {
-  const raw = Array.isArray(value) ? value : DEFAULT_HISTORY_SETTINGS.experimentalHosts;
   const unique = new Set(
-    raw
+    (Array.isArray(value) ? value : [])
       .map((entry) => entry.trim().toLowerCase())
       .filter(Boolean),
   );
 
-  if (unique.size === 0) {
-    DEFAULT_HISTORY_SETTINGS.experimentalHosts.forEach((host) => unique.add(host));
-  }
-
   return [...unique];
+}
+
+function normalizeStoredUiMode(
+  value: HistoryUiMode | undefined,
+  _debug: boolean,
+): HistoryUiMode {
+  return normalizeUiMode(value);
 }

@@ -28,11 +28,23 @@ interface HistoryIndexEntry {
 
 type HistoryIndex = Record<string, HistoryIndexEntry>;
 
+const HISTORY_STORAGE_PREFIX = 'stet:history:';
 const HISTORY_INDEX_KEY = 'stet:history:index';
 
 export async function loadHistoryRecord(storageKey: string): Promise<EditableHistoryRecord | null> {
   const stored = await storageGet<EditableHistoryRecord | undefined>(storageKey);
   return stored ?? null;
+}
+
+export function getHistoryStorageKey(fieldKey: string): string {
+  return `${HISTORY_STORAGE_PREFIX}${fieldKey}`;
+}
+
+export async function loadHistoryRecordByFieldKey(
+  fieldKey: string,
+): Promise<EditableHistoryRecord | null> {
+  if (!fieldKey) return null;
+  return loadHistoryRecord(getHistoryStorageKey(fieldKey));
 }
 
 export async function loadHistoryRecordForTarget(

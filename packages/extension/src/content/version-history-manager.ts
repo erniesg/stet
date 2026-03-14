@@ -1,5 +1,4 @@
 import {
-  discoverHistoryEditables,
   findHistoryEditable,
   getEditableTarget,
   type EditableTarget,
@@ -15,6 +14,7 @@ import { loadHistoryRecordForTarget, saveSnapshotForTarget } from './version-his
 import {
   flushHistoryEventRates,
   getElapsedMs,
+  getHistoryErrorLogData,
   getHistoryTargetLogData,
   getNow,
   isHistoryDebugEnabled,
@@ -22,7 +22,10 @@ import {
   logHistoryEvent,
   recordHistoryEventRate,
 } from './version-history-debug.js';
-import { computeFieldHistoryLayout } from './version-history-layout.js';
+import {
+  computeFieldHistoryLayout,
+  type HistoryLayoutRect,
+} from './version-history-layout.js';
 import {
   resolveHistoryRuntimeConfig,
   type HistoryRuntimeConfig,
@@ -33,6 +36,7 @@ class HistorySession {
   public record: EditableHistoryRecord | null = null;
 
   private loadPromise: Promise<EditableHistoryRecord | null> | null = null;
+  private loaded = false;
   private writeChain: Promise<EditableHistoryRecord | null> = Promise.resolve(null);
   private saveTimer: number | null = null;
   private readonly handleInputBound: () => void;
@@ -42,15 +46,13 @@ class HistorySession {
     public readonly target: EditableTarget,
     private readonly debug: boolean,
     private readonly onChange: () => void,
+    private readonly onError: (error: unknown) => void,
   ) {
     this.handleInputBound = () => {
-      recordHistoryEventRate('input', { fieldKey: this.target.fieldKey }, this.debug);
-      void this.ensureLoaded();
-      this.scheduleAutosave();
+      this.noteInput();
     };
     this.handleBlurBound = () => {
-      recordHistoryEventRate('blur', { fieldKey: this.target.fieldKey }, this.debug);
-      void this.persist('blur', true);
+      this.noteBlur();
     };
 
     this.target.element.addEventListener('input', this.handleInputBound);
@@ -58,11 +60,12 @@ class HistorySession {
   }
 
   async ensureLoaded(): Promise<EditableHistoryRecord | null> {
-    if (this.record) return this.record;
+    if (this.loaded) return this.record;
     if (!this.loadPromise) {
       this.loadPromise = loadHistoryRecordForTarget(this.target, this.debug)
         .then((record) => {
           this.record = record;
+          this.loaded = true;
           this.onChange();
           return record;
         })
@@ -105,6 +108,17 @@ class HistorySession {
     return this.writeChain;
   }
 
+  noteInput() {
+    recordHistoryEventRate('input', { fieldKey: this.target.fieldKey }, this.debug);
+    void this.ensureLoaded().catch(this.onError);
+    this.scheduleAutosave();
+  }
+
+  noteBlur() {
+    recordHistoryEventRate('blur', { fieldKey: this.target.fieldKey }, this.debug);
+    void this.persist('blur', true).catch(this.onError);
+  }
+
   destroy() {
     if (this.saveTimer !== null) {
       window.clearTimeout(this.saveTimer);
@@ -120,36 +134,61 @@ class HistorySession {
     }
 
     this.saveTimer = window.setTimeout(() => {
-      void this.persist('autosave');
+      void this.persist('autosave').catch(this.onError);
     }, DEFAULT_HISTORY_POLICY.debounceMs);
 
     this.onChange();
   }
 }
 
+let historyManager: VersionHistoryManager | null = null;
+
 export function initVersionHistory() {
-  void loadHistoryRuntime().then((runtime) => {
-    logHistoryEvent('history:init', {
-      enabled: runtime.enabled,
-      requestedUiMode: runtime.requestedUiMode,
-      allowAnchoredUi: runtime.allowAnchoredUi,
-      reason: runtime.reason,
-    }, { debug: runtime.debug });
+  if (historyManager) {
+    logHistoryEvent('history:init-skip', {
+      reason: 'duplicate-manager',
+    }, {
+      debug: isHistoryDebugEnabled(false),
+      level: 'warn',
+    });
+    return;
+  }
 
-    if (!runtime.enabled) return;
+  void loadHistoryRuntime()
+    .then((runtime) => {
+      logHistoryEvent('history:init', {
+        enabled: runtime.enabled,
+        requestedUiMode: runtime.requestedUiMode,
+        allowAnchoredUi: runtime.allowAnchoredUi,
+        reason: runtime.reason,
+      }, { debug: runtime.debug });
 
-    const manager = new VersionHistoryManager(runtime);
-    manager.init();
-  });
+      if (!runtime.enabled) return;
+
+      const manager = new VersionHistoryManager(runtime);
+      historyManager = manager;
+      manager.init();
+    })
+    .catch((error) => {
+      historyManager = null;
+      logHistoryEvent('history:error', {
+        source: 'init-version-history',
+        ...getHistoryErrorLogData(error),
+      }, {
+        debug: isHistoryDebugEnabled(false),
+        level: 'warn',
+      });
+    });
 }
 
-class VersionHistoryManager {
+export class VersionHistoryManager {
   constructor(private readonly runtime: HistoryRuntimeConfig) {}
 
-  private readonly sessions = new Map<HTMLElement, HistorySession>();
   private activeSession: HistorySession | null = null;
   private selectedSnapshotId: string | null = null;
   private isPanelOpen = false;
+  private observer: MutationObserver | null = null;
+  private hasFatalError = false;
 
   private readonly root = document.createElement('div');
   private readonly button = document.createElement('button');
@@ -168,31 +207,114 @@ class VersionHistoryManager {
   private pendingPositionSource: string | null = null;
 
   init() {
-    if (this.runtime.requestedUiMode === 'field' && !this.isFieldMode) {
-      logHistoryEvent('history:mode-fallback', {
-        allowAnchoredUi: this.runtime.allowAnchoredUi,
-        reason: this.runtime.reason ?? 'field-ui-host-blocked',
-      }, { debug: this.runtime.debug });
-    }
+    this.runGuarded('init', () => {
+      if (this.runtime.requestedUiMode === 'field' && !this.isFieldMode) {
+        logHistoryEvent('history:mode-fallback', {
+          allowAnchoredUi: this.runtime.allowAnchoredUi,
+          reason: this.runtime.reason ?? 'field-ui-host-blocked',
+        }, { debug: this.runtime.debug });
+      }
 
-    this.buildUi();
-    this.attachExistingEditables();
-    this.observeDom();
+      this.buildUi();
+      this.observeDom();
 
-    document.addEventListener('focusin', this.handleFocusIn, true);
-    document.addEventListener('keydown', this.handleKeyDown, true);
-    document.addEventListener('visibilitychange', this.handleVisibilityChange, true);
-    window.addEventListener('pagehide', this.handlePageHide, true);
+      document.addEventListener('focusin', this.handleFocusIn, true);
+      document.addEventListener('focusout', this.handleFocusOut, true);
+      document.addEventListener('input', this.handleInput, true);
+      document.addEventListener('keydown', this.handleKeyDown, true);
+      document.addEventListener('pointerdown', this.handlePointerDown, true);
+      document.addEventListener('visibilitychange', this.handleVisibilityChange, true);
+      window.addEventListener('pagehide', this.handlePageHide, true);
+      if (this.isFieldMode) {
+        window.addEventListener('resize', this.handleViewportShift, true);
+        window.addEventListener('scroll', this.handleViewportShift, true);
+      }
+
+      const active = getInitialHistoryEditable(document.activeElement);
+      if (active) {
+        this.activateElement(active, 'init');
+      } else {
+        this.renderButton();
+      }
+    });
+  }
+
+  destroy() {
+    document.removeEventListener('focusin', this.handleFocusIn, true);
+    document.removeEventListener('focusout', this.handleFocusOut, true);
+    document.removeEventListener('input', this.handleInput, true);
+    document.removeEventListener('keydown', this.handleKeyDown, true);
+    document.removeEventListener('pointerdown', this.handlePointerDown, true);
+    document.removeEventListener('visibilitychange', this.handleVisibilityChange, true);
+    window.removeEventListener('pagehide', this.handlePageHide, true);
     if (this.isFieldMode) {
-      window.addEventListener('resize', this.handleViewportShift, true);
-      window.addEventListener('scroll', this.handleViewportShift, true);
+      window.removeEventListener('resize', this.handleViewportShift, true);
+      window.removeEventListener('scroll', this.handleViewportShift, true);
     }
 
-    const active = findHistoryEditable(document.activeElement);
-    if (active) {
-      this.activateElement(active, 'init');
-    } else {
-      this.renderButton();
+    this.observer?.disconnect();
+    this.observer = null;
+
+    if (this.repositionFrame !== null) {
+      window.cancelAnimationFrame(this.repositionFrame);
+      this.repositionFrame = null;
+      this.pendingPositionSource = null;
+    }
+
+    this.releaseActiveSession('destroy', { clearUi: true, closePanel: false });
+    this.root.remove();
+    if (historyManager === this) {
+      historyManager = null;
+    }
+  }
+
+  private runGuarded(source: string, fn: () => void) {
+    if (this.hasFatalError) return;
+
+    try {
+      fn();
+    } catch (error) {
+      this.handleFatalError(source, error);
+    }
+  }
+
+  private runAsyncGuarded(source: string, fn: () => Promise<void>) {
+    if (this.hasFatalError) return;
+
+    try {
+      void fn().catch((error) => {
+        this.handleFatalError(source, error);
+      });
+    } catch (error) {
+      this.handleFatalError(source, error);
+    }
+  }
+
+  private handleFatalError(source: string, error: unknown) {
+    if (this.hasFatalError) return;
+    this.hasFatalError = true;
+
+    logHistoryEvent('history:error', {
+      source,
+      activeFieldKey: this.activeSession?.target.fieldKey ?? null,
+      panelOpen: this.isPanelOpen,
+      uiMode: this.isFieldMode ? 'field' : 'page',
+      ...getHistoryErrorLogData(error),
+    }, {
+      debug: true,
+      level: 'warn',
+    });
+
+    try {
+      this.destroy();
+    } catch (destroyError) {
+      logHistoryEvent('history:error', {
+        source: 'fatal-destroy',
+        ...getHistoryErrorLogData(destroyError),
+      }, {
+        debug: true,
+        level: 'warn',
+      });
     }
   }
 
@@ -202,11 +324,13 @@ class VersionHistoryManager {
     this.button.className = 'stet-history-button';
     this.button.type = 'button';
     this.button.addEventListener('click', () => {
-      if (this.isPanelOpen) {
-        this.closePanel();
-      } else {
-        void this.openPanel();
-      }
+      this.runAsyncGuarded('button-click', async () => {
+        if (this.isPanelOpen) {
+          this.closePanel();
+        } else {
+          await this.openPanel();
+        }
+      });
     });
 
     this.buttonTitle.className = 'stet-history-button-title';
@@ -237,7 +361,16 @@ class VersionHistoryManager {
     closeButton.className = 'stet-history-close';
     closeButton.type = 'button';
     closeButton.textContent = '×';
-    closeButton.addEventListener('click', () => this.closePanel());
+    closeButton.addEventListener('click', () => {
+      this.runGuarded('close-click', () => {
+        if (this.isFieldMode) {
+          this.closePanel();
+          return;
+        }
+
+        this.releaseActiveSession('manual-close', { clearUi: true, closePanel: true });
+      });
+    });
 
     header.append(titleGroup, closeButton);
 
@@ -248,7 +381,9 @@ class VersionHistoryManager {
     this.snapshotNowButton.type = 'button';
     this.snapshotNowButton.textContent = 'Snapshot now';
     this.snapshotNowButton.addEventListener('click', () => {
-      void this.captureManualSnapshot();
+      this.runAsyncGuarded('snapshot-click', async () => {
+        await this.captureManualSnapshot();
+      });
     });
 
     actions.append(this.snapshotNowButton);
@@ -262,11 +397,13 @@ class VersionHistoryManager {
 
     this.versionsList.className = 'stet-history-list';
     this.versionsList.addEventListener('click', (event) => {
-      const trigger = (event.target as HTMLElement | null)?.closest<HTMLButtonElement>('[data-snapshot-id]');
-      const snapshotId = trigger?.dataset.snapshotId;
-      if (!snapshotId) return;
-      this.selectedSnapshotId = snapshotId;
-      this.renderPanel();
+      this.runGuarded('list-click', () => {
+        const trigger = (event.target as HTMLElement | null)?.closest<HTMLButtonElement>('[data-snapshot-id]');
+        const snapshotId = trigger?.dataset.snapshotId;
+        if (!snapshotId) return;
+        this.selectedSnapshotId = snapshotId;
+        this.renderPanel();
+      });
     });
 
     this.emptyState.className = 'stet-history-empty';
@@ -288,7 +425,9 @@ class VersionHistoryManager {
     this.restoreButton.type = 'button';
     this.restoreButton.textContent = 'Restore selected version';
     this.restoreButton.addEventListener('click', () => {
-      void this.restoreSelectedSnapshot();
+      this.runAsyncGuarded('restore-click', async () => {
+        await this.restoreSelectedSnapshot();
+      });
     });
 
     previewSection.append(previewHeading, this.previewSummary, this.previewDiff, this.restoreButton);
@@ -302,51 +441,100 @@ class VersionHistoryManager {
     this.updateFloatingPosition('mount', true);
   }
 
-  private attachExistingEditables() {
-    discoverHistoryEditables().forEach((element) => this.attachEditable(element, 'initial-scan'));
-  }
-
-  private attachEditable(element: HTMLElement, source: string) {
-    if (this.sessions.has(element)) return;
-
+  private activateElement(element: HTMLElement, source: string): HistorySession | null {
     const target = getEditableTarget(element);
-    if (!target) return;
+    if (!target) return null;
 
-    const session = new HistorySession(target, this.runtime.debug, () => {
-      if (this.activeSession === session) {
-        this.renderButton();
-        if (this.isPanelOpen) this.renderPanel();
-      }
-    });
+    const current = this.activeSession;
+    if (current?.target.element === element) {
+      logHistoryEvent('history:activate', {
+        ...getHistoryTargetLogData(current.target),
+        source,
+        retained: true,
+      }, { debug: this.runtime.debug });
+      this.ensureSelectedSnapshot();
+      this.renderButton();
+      this.updateFloatingPosition(source, true);
+      return current;
+    }
 
-    this.sessions.set(element, session);
+    this.releaseActiveSession(
+      current && current.target.fieldKey === target.fieldKey ? 'remount' : 'switch',
+      { clearUi: false, closePanel: false },
+    );
+
+    const session = new HistorySession(
+      target,
+      this.runtime.debug,
+      () => {
+        if (this.activeSession === session) {
+          this.renderButton();
+          if (this.isPanelOpen) this.renderPanel();
+        }
+      },
+      (error) => {
+        this.handleFatalError('session', error);
+      },
+    );
+
+    this.activeSession = session;
     logHistoryEvent('history:bind', {
       ...getHistoryTargetLogData(target),
       source,
     }, { debug: this.runtime.debug });
-  }
-
-  private activateElement(element: HTMLElement, source: string) {
-    this.attachEditable(element, source);
-    const session = this.sessions.get(element);
-    if (!session) return;
-
-    this.activeSession = session;
     logHistoryEvent('history:activate', {
-      ...getHistoryTargetLogData(session.target),
+      ...getHistoryTargetLogData(target),
       source,
     }, { debug: this.runtime.debug });
 
-    void session.ensureLoaded().then(() => {
-      if (this.activeSession !== session) return;
-      this.ensureSelectedSnapshot();
-      this.renderButton();
-      if (this.isPanelOpen) this.renderPanel();
-    });
+    void session.ensureLoaded()
+      .then(() => {
+        if (this.activeSession !== session) return;
+        this.ensureSelectedSnapshot();
+        this.renderButton();
+        if (this.isPanelOpen) this.renderPanel();
+      })
+      .catch((error) => {
+        this.handleFatalError('activate-ensure-loaded', error);
+      });
 
     this.ensureSelectedSnapshot();
     this.renderButton();
     this.updateFloatingPosition(source, true);
+    return session;
+  }
+
+  private releaseActiveSession(
+    reason: string,
+    options: { clearUi: boolean; closePanel: boolean },
+  ) {
+    const session = this.activeSession;
+    if (!session) {
+      if (options.clearUi) {
+        this.selectedSnapshotId = null;
+        if (options.closePanel) this.closePanel();
+        this.renderButton();
+      }
+      return;
+    }
+
+    void session.flushPending().catch((error) => {
+      this.handleFatalError(`release-${reason}`, error);
+    });
+    session.destroy();
+    logHistoryEvent('history:unbind', {
+      ...getHistoryTargetLogData(session.target),
+      reason,
+    }, { debug: this.runtime.debug });
+
+    this.activeSession = null;
+    if (options.clearUi) {
+      this.selectedSnapshotId = null;
+      if (options.closePanel) {
+        this.closePanel();
+      }
+      this.renderButton();
+    }
   }
 
   private async openPanel() {
@@ -408,8 +596,12 @@ class VersionHistoryManager {
     const latest = versions.at(-1);
 
     this.buttonMeta.textContent = latest
-      ? `${versions.length} version${versions.length === 1 ? '' : 's'} · ${formatRelativeTime(latest.savedAt)}`
-      : 'No local versions yet';
+      ? this.isFieldMode
+        ? `${versions.length} saved`
+        : `${versions.length} version${versions.length === 1 ? '' : 's'} · ${formatRelativeTime(latest.savedAt)}`
+      : this.isFieldMode
+        ? 'Empty'
+        : 'No local versions yet';
 
     this.updateFloatingPosition('render-button');
   }
@@ -428,7 +620,7 @@ class VersionHistoryManager {
     this.headerTitle.textContent = session.target.label;
     this.headerMeta.textContent = session.target.descriptor;
     this.emptyState.hidden = snapshots.length > 0;
-    this.versionsList.innerHTML = '';
+    this.versionsList.replaceChildren();
 
     for (const snapshot of [...snapshots].reverse()) {
       const item = document.createElement('button');
@@ -450,7 +642,7 @@ class VersionHistoryManager {
 
     if (!selected) {
       this.previewSummary.textContent = 'Pick a saved version to preview the full restore diff.';
-      this.previewDiff.innerHTML = '';
+      this.previewDiff.replaceChildren();
       this.restoreButton.disabled = true;
       this.updateFloatingPosition('render-panel');
       return;
@@ -464,7 +656,7 @@ class VersionHistoryManager {
       ? 'Selected version matches the current draft.'
       : `Restoring this version will add ${diff.addedChars.toLocaleString()} chars and remove ${diff.removedChars.toLocaleString()} chars.`;
 
-    this.previewDiff.innerHTML = renderDiffHtml(diff.chunks);
+    this.previewDiff.replaceChildren(renderDiffNodes(diff.chunks));
     this.restoreButton.disabled = unchanged;
     this.updateFloatingPosition('render-panel');
   }
@@ -513,102 +705,131 @@ class VersionHistoryManager {
   }
 
   private observeDom() {
-    const observer = new MutationObserver((mutations) => {
-      recordHistoryEventRate('mutation', {
-        mutationCount: mutations.length,
-      }, this.runtime.debug);
+    this.observer = new MutationObserver((mutations) => {
+      this.runGuarded('mutation-observer', () => {
+        recordHistoryEventRate('mutation', {
+          mutationCount: mutations.length,
+        }, this.runtime.debug);
 
-      for (const mutation of mutations) {
-        mutation.addedNodes.forEach((node) => {
-          if (!(node instanceof HTMLElement)) return;
-          discoverHistoryEditables(node).forEach((element) => this.attachEditable(element, 'mutation'));
-        });
+        const session = this.activeSession;
+        if (!session) return;
 
-        mutation.removedNodes.forEach((node) => {
-          if (!(node instanceof HTMLElement)) return;
-          this.detachEditablesInSubtree(node);
-        });
-      }
+        if (!session.target.element.isConnected) {
+          const nextActive = findHistoryEditable(document.activeElement);
+          if (nextActive) {
+            this.activateElement(nextActive, 'mutation-reconnect');
+          } else {
+            this.releaseActiveSession('disconnect', { clearUi: true, closePanel: true });
+          }
+          return;
+        }
 
-      this.pruneDisconnectedSessions();
+        this.scheduleFloatingPosition('mutation');
+      });
     });
 
-    observer.observe(document.body ?? document.documentElement, {
+    this.observer.observe(document.body ?? document.documentElement, {
       childList: true,
       subtree: true,
     });
   }
 
-  private detachEditablesInSubtree(root: HTMLElement) {
-    for (const [element, session] of this.sessions) {
-      if (element === root || root.contains(element)) {
-        session.destroy();
-        this.sessions.delete(element);
-        logHistoryEvent('history:unbind', {
-          ...getHistoryTargetLogData(session.target),
-          reason: 'dom-remove',
-        }, { debug: this.runtime.debug });
-        if (this.activeSession === session) {
-          this.activeSession = null;
-          this.selectedSnapshotId = null;
-          this.closePanel();
-          this.renderButton();
-        }
-      }
-    }
-  }
-
-  private pruneDisconnectedSessions() {
-    for (const [element, session] of this.sessions) {
-      if (element.isConnected) continue;
-      session.destroy();
-      this.sessions.delete(element);
-      logHistoryEvent('history:unbind', {
-        ...getHistoryTargetLogData(session.target),
-        reason: 'disconnect',
-      }, { debug: this.runtime.debug });
-      if (this.activeSession === session) {
-        this.activeSession = null;
-        this.selectedSnapshotId = null;
-      }
-    }
-
-    this.renderButton();
-  }
-
   private readonly handleFocusIn = (event: FocusEvent) => {
-    recordHistoryEventRate('focusin', {}, this.runtime.debug);
-    const editable = findHistoryEditable(event.target);
-    if (!editable) return;
-    this.activateElement(editable, 'focusin');
+    this.runGuarded('focusin', () => {
+      recordHistoryEventRate('focusin', {}, this.runtime.debug);
+      if (event.target instanceof Node && this.root.contains(event.target)) return;
+
+      const editable = findHistoryEditable(event.target);
+      if (!editable) {
+        this.releaseActiveSession('focus-away', { clearUi: true, closePanel: true });
+        return;
+      }
+
+      this.activateElement(editable, 'focusin');
+    });
+  };
+
+  private readonly handleInput = (event: Event) => {
+    this.runGuarded('input', () => {
+      if (event.target instanceof Node && this.root.contains(event.target)) return;
+
+      const editable = findHistoryEditable(event.target);
+      if (!editable) return;
+
+      const wasActive = this.activeSession?.target.element === editable;
+      if (wasActive) return;
+
+      const session = this.activateElement(editable, 'input');
+      if (!session) return;
+      session.noteInput();
+    });
+  };
+
+  private readonly handleFocusOut = (event: FocusEvent) => {
+    this.runGuarded('focusout', () => {
+      const session = this.activeSession;
+      if (!session) return;
+      if (event.target instanceof Node && this.root.contains(event.target)) return;
+
+      const fromEditable = findHistoryEditable(event.target);
+      if (fromEditable !== session.target.element) return;
+
+      const nextTarget = event.relatedTarget;
+      if (nextTarget instanceof Node && this.root.contains(nextTarget)) return;
+
+      const nextEditable = findHistoryEditable(nextTarget);
+      if (nextEditable) return;
+
+      this.releaseActiveSession('focusout', { clearUi: true, closePanel: true });
+    });
   };
 
   private readonly handleKeyDown = (event: KeyboardEvent) => {
-    if (event.key === 'Escape' && this.isPanelOpen) {
+    this.runGuarded('keydown', () => {
+      if (event.key === 'Escape' && this.isPanelOpen) {
+        this.closePanel();
+      }
+    });
+  };
+
+  private readonly handlePointerDown = (event: PointerEvent) => {
+    this.runGuarded('pointerdown', () => {
+      if (!this.isPanelOpen) return;
+      if (!(event.target instanceof Node)) return;
+      if (this.root.contains(event.target)) return;
+
       this.closePanel();
-    }
+    });
   };
 
   private readonly handleVisibilityChange = () => {
     if (!document.hidden) return;
-    void this.flushAllSessions();
+    this.runAsyncGuarded('visibilitychange', async () => {
+      await this.flushAllSessions();
+    });
   };
 
   private readonly handlePageHide = () => {
-    void this.flushAllSessions();
+    this.runAsyncGuarded('pagehide', async () => {
+      await this.flushAllSessions();
+    });
   };
 
   private readonly handleViewportShift = () => {
-    recordHistoryEventRate('viewport', { open: this.isPanelOpen }, this.runtime.debug);
-    this.scheduleFloatingPosition('viewport');
+    this.runGuarded('viewport-shift', () => {
+      recordHistoryEventRate('viewport', { open: this.isPanelOpen }, this.runtime.debug);
+      this.scheduleFloatingPosition('viewport');
+    });
   };
 
   private async flushAllSessions() {
     const startedAt = getNow();
-    await Promise.all([...this.sessions.values()].map((session) => session.flushPending()));
+    if (this.activeSession) {
+      await this.activeSession.flushPending();
+    }
     flushHistoryEventRates(this.runtime.debug);
     logHistoryEvent('history:flush', {
-      sessionCount: this.sessions.size,
+      sessionCount: this.activeSession ? 1 : 0,
       elapsedMs: getElapsedMs(startedAt),
     }, { debug: this.runtime.debug });
   }
@@ -643,6 +864,7 @@ class VersionHistoryManager {
     }
 
     const targetRect = session.target.element.getBoundingClientRect();
+    const obstacles = this.collectLayoutObstacles(session.target.element);
     const layout = computeFieldHistoryLayout({
       targetRect: {
         top: targetRect.top,
@@ -657,6 +879,7 @@ class VersionHistoryManager {
       panelWidth: this.panel.offsetWidth || 420,
       panelHeight: this.panel.hidden ? 420 : (this.panel.offsetHeight || 420),
       panelOpen: this.isPanelOpen,
+      obstacles,
     });
 
     if (!layout.visible) {
@@ -690,6 +913,46 @@ class VersionHistoryManager {
     delete this.panel.dataset.placement;
   }
 
+  private collectLayoutObstacles(targetElement: HTMLElement): HistoryLayoutRect[] {
+    const selector = [
+      'button',
+      'a[href]',
+      'input',
+      'select',
+      'textarea',
+      '[role="button"]',
+      '[role="tab"]',
+      '[role="menuitem"]',
+      'summary',
+    ].join(', ');
+
+    return [...document.querySelectorAll<HTMLElement>(selector)]
+      .filter((element) => {
+        if (!element.isConnected) return false;
+        if (this.root.contains(element)) return false;
+        if (element === targetElement) return false;
+        if (targetElement.contains(element)) return false;
+        if (element.contains(targetElement)) return false;
+
+        const style = window.getComputedStyle(element);
+        if (style.display === 'none' || style.visibility === 'hidden' || style.pointerEvents === 'none') {
+          return false;
+        }
+
+        const rect = element.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      })
+      .map((element) => {
+        const rect = element.getBoundingClientRect();
+        return {
+          top: rect.top,
+          left: rect.left,
+          width: rect.width,
+          height: rect.height,
+        };
+      });
+  }
+
   private logPosition(source: string) {
     const buttonRect = this.button.getBoundingClientRect();
     const panelRect = this.panel.getBoundingClientRect();
@@ -719,7 +982,7 @@ class VersionHistoryManager {
   }
 
   private get isFieldMode(): boolean {
-    return this.runtime.requestedUiMode === 'field' && this.runtime.allowAnchoredUi;
+    return this.runtime.requestedUiMode !== 'off';
   }
 }
 
@@ -743,36 +1006,59 @@ async function loadHistoryRuntime(): Promise<HistoryRuntimeConfig> {
 
 function readHistoryUiModeOverride(): HistoryUiMode | undefined {
   const queryOverride = new URLSearchParams(window.location.search).get('stetHistoryUi');
-  if (queryOverride === 'off' || queryOverride === 'page' || queryOverride === 'field') {
+  if (queryOverride === 'off' || queryOverride === 'field') {
     return queryOverride;
+  }
+  if (queryOverride === 'page') {
+    return 'field';
   }
 
   const windowOverride = window.__stetHistoryUiMode;
-  if (windowOverride === 'off' || windowOverride === 'page' || windowOverride === 'field') {
+  if (windowOverride === 'off' || windowOverride === 'field') {
     return windowOverride;
+  }
+  if (windowOverride === 'page') {
+    return 'field';
   }
 
   return undefined;
 }
 
-function renderDiffHtml(chunks: ReturnType<typeof diffText>['chunks']): string {
+function renderDiffNodes(chunks: ReturnType<typeof diffText>['chunks']): DocumentFragment {
+  const fragment = document.createDocumentFragment();
+
   if (chunks.length === 0) {
-    return '<p class="stet-history-preview-note">No textual differences.</p>';
+    const note = document.createElement('p');
+    note.className = 'stet-history-preview-note';
+    note.textContent = 'No textual differences.';
+    fragment.append(note);
+    return fragment;
   }
 
-  return chunks.map((chunk) => {
-    const value = escapeHtml(chunk.value).replace(/\n/g, '<br>');
-    if (chunk.type === 'equal') return `<span>${value}</span>`;
-    if (chunk.type === 'insert') return `<ins class="stet-history-insert">${value}</ins>`;
-    return `<del class="stet-history-delete">${value}</del>`;
-  }).join('');
+  for (const chunk of chunks) {
+    const element = chunk.type === 'equal'
+      ? document.createElement('span')
+      : chunk.type === 'insert'
+        ? document.createElement('ins')
+        : document.createElement('del');
+
+    if (chunk.type === 'insert') element.className = 'stet-history-insert';
+    if (chunk.type === 'delete') element.className = 'stet-history-delete';
+    appendTextWithLineBreaks(element, chunk.value);
+    fragment.append(element);
+  }
+
+  return fragment;
 }
 
-function escapeHtml(value: string): string {
-  return value
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
+function appendTextWithLineBreaks(parent: HTMLElement, value: string) {
+  const parts = value.split('\n');
+  parts.forEach((part, index) => {
+    if (index > 0) parent.append(document.createElement('br'));
+    if (part.length > 0) {
+      parent.append(document.createTextNode(part));
+    }
+  });
 }
 
 function formatVersionLabel(snapshot: VersionSnapshot): string {
@@ -807,4 +1093,18 @@ function formatAbsoluteDate(dateString: string): string {
     dateStyle: 'medium',
     timeStyle: 'short',
   }).format(date);
+}
+
+function getInitialHistoryEditable(start: Element | null): HTMLElement | null {
+  if (!(start instanceof HTMLElement)) return null;
+
+  if (start instanceof HTMLTextAreaElement || start instanceof HTMLInputElement) {
+    return findHistoryEditable(start);
+  }
+
+  if (start.isContentEditable || start.getAttribute('contenteditable') !== null) {
+    return findHistoryEditable(start);
+  }
+
+  return null;
 }

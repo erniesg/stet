@@ -16,6 +16,7 @@ import {
   normalizeHistorySettings,
   type HistorySettings,
 } from '../history-settings.js';
+import { getDefaultSiteAllowlist, normalizeSiteAllowlist } from '../host-access.js';
 
 // Re-export types for extension consumers
 export type { ResolvedStetConfig, UserOverrides };
@@ -33,7 +34,9 @@ export interface StoredSettings {
 /** Default stored settings — common pack only, no overrides */
 export const DEFAULT_STORED_SETTINGS: StoredSettings = {
   resolvedConfig: DEFAULT_RESOLVED_CONFIG,
-  userOverrides: {},
+  userOverrides: {
+    siteAllowlist: getDefaultSiteAllowlist(),
+  },
   history: DEFAULT_HISTORY_SETTINGS,
 };
 
@@ -44,7 +47,7 @@ export async function loadSettings(): Promise<StoredSettings> {
       const raw = result as Partial<StoredSettings>;
       resolve({
         resolvedConfig: raw.resolvedConfig ?? DEFAULT_STORED_SETTINGS.resolvedConfig,
-        userOverrides: raw.userOverrides ?? DEFAULT_STORED_SETTINGS.userOverrides,
+        userOverrides: normalizeUserOverrides(raw.userOverrides),
         history: normalizeHistorySettings(raw.history),
       });
     });
@@ -74,6 +77,15 @@ export async function getHistorySettings(): Promise<HistorySettings> {
 export async function updateUserOverrides(patch: Partial<UserOverrides>): Promise<void> {
   const { userOverrides } = await loadSettings();
   await saveSettings({
-    userOverrides: { ...userOverrides, ...patch },
+    userOverrides: normalizeUserOverrides({ ...userOverrides, ...patch }),
   });
+}
+
+function normalizeUserOverrides(overrides?: Partial<UserOverrides> | null): UserOverrides {
+  const normalizedOverrides = overrides ? { ...overrides } : {};
+
+  return {
+    ...normalizedOverrides,
+    siteAllowlist: normalizeSiteAllowlist(normalizedOverrides.siteAllowlist),
+  };
 }

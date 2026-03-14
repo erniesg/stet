@@ -41,6 +41,36 @@ interface TabIssueState {
   issues: PopupIssueRecord[];
 }
 
+interface HistoryDebugStorageRecord {
+  tabId: number;
+  frameId: number;
+  href: string;
+  updatedAt: string;
+  entries: Array<{
+    event: string;
+    timestamp: string;
+    href: string;
+    data: Record<string, unknown>;
+  }>;
+}
+
+interface PageDebugEvent {
+  pageEventType: string;
+  href: string;
+  timestamp: string;
+  payload: Record<string, unknown>;
+}
+
+interface TraceEventEntry {
+  source: 'history' | 'page';
+  event: string;
+  timestamp: string;
+  href: string;
+  data: Record<string, unknown>;
+  tabId: number | null;
+  frameId: number | null;
+}
+
 const EMPTY_TAB_ISSUES: TabIssueState = {
   enabled: false,
   totalIssues: 0,
@@ -52,6 +82,15 @@ const EMPTY_TAB_ISSUES: TabIssueState = {
 };
 
 const tabIssueStates = new Map<number, Map<number, FrameIssueState>>();
+const historyDebugKeysByTab = new Map<number, Set<string>>();
+const HISTORY_DEBUG_STORAGE_PREFIX = 'stet:history:debug:';
+const HISTORY_DEBUG_LATEST_KEY = 'stet:history:debug:last';
+const PAGE_DEBUG_LATEST_KEY = 'stet:page:debug:last';
+const TRACE_STORAGE_KEY = 'stet:trace:events';
+const TRACE_MAX_ENTRIES = 2000;
+const TRACE_FILE_ENDPOINT = 'http://127.0.0.1:5123/trace';
+let traceEntriesCache: TraceEventEntry[] | null = null;
+let traceWriteChain: Promise<void> = Promise.resolve();
 
 function setBadgeForTab(tabId: number, count: number) {
   chrome.action.setBadgeText({ text: count > 0 ? String(count) : '', tabId });
@@ -153,13 +192,90 @@ function clearTabIssueState(tabId: number) {
   broadcastTabIssueState(tabId);
 }
 
+function getHistoryDebugStorageKey(tabId: number, frameId: number): string {
+  return `${HISTORY_DEBUG_STORAGE_PREFIX}${tabId}:${frameId}`;
+}
+
+function rememberHistoryDebugKey(tabId: number, key: string) {
+  let keys = historyDebugKeysByTab.get(tabId);
+  if (!keys) {
+    keys = new Set<string>();
+    historyDebugKeysByTab.set(tabId, keys);
+  }
+  keys.add(key);
+}
+
+function clearHistoryDebugBuffers(tabId: number) {
+  const keys = historyDebugKeysByTab.get(tabId);
+  if (!keys || keys.size === 0) return;
+
+  chrome.storage.local.remove([...keys]);
+  historyDebugKeysByTab.delete(tabId);
+}
+
+function loadTraceEntries(): Promise<TraceEventEntry[]> {
+  if (traceEntriesCache) {
+    return Promise.resolve(traceEntriesCache);
+  }
+
+  return new Promise((resolve) => {
+    chrome.storage.local.get(TRACE_STORAGE_KEY, (result) => {
+      const stored = Array.isArray(result[TRACE_STORAGE_KEY]) ? result[TRACE_STORAGE_KEY] : [];
+      traceEntriesCache = stored.filter((entry): entry is TraceEventEntry => (
+        typeof entry === 'object' &&
+        entry !== null &&
+        typeof (entry as { event?: unknown }).event === 'string' &&
+        typeof (entry as { timestamp?: unknown }).timestamp === 'string' &&
+        typeof (entry as { href?: unknown }).href === 'string' &&
+        typeof (entry as { source?: unknown }).source === 'string' &&
+        typeof (entry as { data?: unknown }).data === 'object' &&
+        (entry as { data?: unknown }).data !== null
+      ));
+      resolve(traceEntriesCache);
+    });
+  });
+}
+
+function appendTraceEntry(entry: TraceEventEntry) {
+  traceWriteChain = traceWriteChain.then(async () => {
+    const entries = await loadTraceEntries();
+    entries.push(entry);
+    if (entries.length > TRACE_MAX_ENTRIES) {
+      entries.splice(0, entries.length - TRACE_MAX_ENTRIES);
+    }
+
+    traceEntriesCache = entries;
+    await new Promise<void>((resolve) => {
+      chrome.storage.local.set({
+        [TRACE_STORAGE_KEY]: entries,
+      }, () => resolve());
+    });
+  });
+
+  void postTraceEntryToCollector(entry);
+}
+
+async function postTraceEntryToCollector(entry: TraceEventEntry) {
+  try {
+    await fetch(TRACE_FILE_ENDPOINT, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(entry),
+    });
+  } catch {}
+}
+
 chrome.tabs.onRemoved.addListener((tabId) => {
   tabIssueStates.delete(tabId);
+  clearHistoryDebugBuffers(tabId);
 });
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (changeInfo.status === 'loading') {
     clearTabIssueState(tabId);
+    clearHistoryDebugBuffers(tabId);
   }
 });
 
@@ -188,6 +304,123 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     case 'GET_HISTORY_SETTINGS':
       getHistorySettings().then((history) => sendResponse({ history }));
       return true;
+
+    case 'PAGE_DEBUG_EVENT':
+      if (typeof sender.tab?.id === 'number') {
+        const event: PageDebugEvent = {
+          pageEventType: typeof message.event?.pageEventType === 'string' ? message.event.pageEventType : 'unknown',
+          href: typeof message.event?.href === 'string' ? message.event.href : sender.tab.url ?? '',
+          timestamp: typeof message.event?.timestamp === 'string' ? message.event.timestamp : new Date().toISOString(),
+          payload: typeof message.event?.payload === 'object' && message.event.payload !== null
+            ? message.event.payload
+            : {},
+        };
+
+        chrome.storage.local.set({
+          [PAGE_DEBUG_LATEST_KEY]: {
+            tabId: sender.tab.id,
+            frameId: sender.frameId ?? 0,
+            ...event,
+          },
+        });
+
+        if (event.pageEventType === 'console-error' || event.pageEventType === 'window-error') {
+          console.error('[Stet/page]', event);
+        } else {
+          console.warn('[Stet/page]', event);
+        }
+
+        appendTraceEntry({
+          source: 'page',
+          event: event.pageEventType,
+          timestamp: event.timestamp,
+          href: event.href,
+          data: event.payload,
+          tabId: sender.tab.id,
+          frameId: sender.frameId ?? 0,
+        });
+      }
+      sendResponse({ ok: true });
+      return false;
+
+    case 'TRACE_EVENT':
+      appendTraceEntry({
+        source: message.source === 'page' ? 'page' : 'history',
+        event: typeof message.entry?.event === 'string' ? message.entry.event : 'unknown',
+        timestamp: typeof message.entry?.timestamp === 'string'
+          ? message.entry.timestamp
+          : new Date().toISOString(),
+        href: typeof message.entry?.href === 'string'
+          ? message.entry.href
+          : sender.tab?.url ?? '',
+        data: typeof message.entry?.data === 'object' && message.entry.data !== null
+          ? message.entry.data
+          : {},
+        tabId: typeof sender.tab?.id === 'number' ? sender.tab.id : null,
+        frameId: sender.frameId ?? 0,
+      });
+      sendResponse({ ok: true });
+      return false;
+
+    case 'SYNC_HISTORY_DEBUG_BUFFER':
+      if (
+        typeof sender.tab?.id === 'number' &&
+        Array.isArray(message.payload?.entries)
+      ) {
+        const tabId = sender.tab.id;
+        const frameId = sender.frameId ?? 0;
+        const storageKey = getHistoryDebugStorageKey(tabId, frameId);
+        const record: HistoryDebugStorageRecord = {
+          tabId,
+          frameId,
+          href: typeof message.payload?.href === 'string' ? message.payload.href : '',
+          updatedAt: typeof message.payload?.updatedAt === 'string'
+            ? message.payload.updatedAt
+            : new Date().toISOString(),
+          entries: message.payload.entries
+            .filter((entry: unknown): entry is HistoryDebugStorageRecord['entries'][number] => (
+              typeof entry === 'object' &&
+              entry !== null &&
+              typeof (entry as { event?: unknown }).event === 'string' &&
+              typeof (entry as { timestamp?: unknown }).timestamp === 'string' &&
+              typeof (entry as { href?: unknown }).href === 'string' &&
+              typeof (entry as { data?: unknown }).data === 'object' &&
+              (entry as { data?: unknown }).data !== null
+            ))
+            .slice(-120),
+        };
+
+        rememberHistoryDebugKey(tabId, storageKey);
+        chrome.storage.local.set({
+          [storageKey]: record,
+          [HISTORY_DEBUG_LATEST_KEY]: record,
+        });
+      }
+      sendResponse({ ok: true });
+      return false;
+
+    case 'GET_HISTORY_DEBUG_BUFFER': {
+      if (message.latest === true) {
+        chrome.storage.local.get(HISTORY_DEBUG_LATEST_KEY, (result) => {
+          sendResponse({ ok: true, record: result[HISTORY_DEBUG_LATEST_KEY] ?? null });
+        });
+        return true;
+      }
+
+      const tabId = typeof message.tabId === 'number' ? message.tabId : sender.tab?.id;
+      if (typeof tabId !== 'number') {
+        sendResponse({ ok: false, record: null });
+        return false;
+      }
+
+      const preferredFrameId = getTabIssueState(tabId).activeFrameId ?? 0;
+      const frameId = typeof message.frameId === 'number' ? message.frameId : preferredFrameId;
+      const storageKey = getHistoryDebugStorageKey(tabId, frameId);
+      chrome.storage.local.get(storageKey, (result) => {
+        sendResponse({ ok: true, record: result[storageKey] ?? null });
+      });
+      return true;
+    }
 
     case 'UPDATE_USER_OVERRIDES':
       // Partial-merge user overrides

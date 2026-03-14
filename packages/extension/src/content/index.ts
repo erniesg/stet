@@ -1,16 +1,14 @@
 /**
  * Public stet extension entry point.
- * Registers the common pack and starts the checker.
+ * Registers the common pack and starts the shared runtime bootstrap.
  */
 
-import { commonPack } from 'stet';
-import { loadCommonDictionary } from 'stet';
-import { initChecker } from './checker.js';
-import { initVersionHistory } from './version-history-manager.js';
+import { commonPack, loadCommonDictionary } from 'stet';
+import { bootContentRuntime } from './runtime.js';
 
-// Register common pack
-void commonPack;
-
-// Start
-initChecker(loadCommonDictionary);
-void initVersionHistory();
+bootContentRuntime({
+  registerPacks: () => {
+    void commonPack;
+  },
+  onDictionaryLoaded: loadCommonDictionary,
+});

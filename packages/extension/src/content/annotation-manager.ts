@@ -9,6 +9,7 @@
 
 import type { Issue } from 'stet';
 import { resolveIssueRange } from './issue-range.js';
+import { getElapsedMs, getNow, logHistoryEvent } from './version-history-debug.js';
 
 const TAG = 'stet-mark';
 
@@ -91,7 +92,15 @@ function showCard(mark: HTMLElement, issue: Issue, onApply: (issue: Issue) => vo
     // Show original → suggestion
     const chip = document.createElement('button');
     chip.className = 'stet-suggestion-chip';
-    chip.innerHTML = `<span class="stet-card-original">${issue.originalText}</span><span class="stet-card-arrow">\u2192</span>${suggestionLabel}`;
+    const original = document.createElement('span');
+    original.className = 'stet-card-original';
+    original.textContent = issue.originalText;
+
+    const arrow = document.createElement('span');
+    arrow.className = 'stet-card-arrow';
+    arrow.textContent = '\u2192';
+
+    chip.append(original, arrow, document.createTextNode(suggestionLabel));
     chip.addEventListener('click', (e) => {
       e.stopPropagation();
       onApply(issue);
@@ -313,10 +322,21 @@ export class AnnotationManager {
   }
 
   annotate(issues: Issue[]): void {
+    const startedAt = getNow();
     const selectionBefore = this.captureSelection(this.buildNodeMap());
+    const clearedMarks = this.marks.length;
     this.clear();
     if (issues.length === 0) {
       this.restoreSelection(selectionBefore, this.buildNodeMap());
+      logHistoryEvent('checker:annotate', {
+        ...getAnnotationElementLogData(this.element),
+        issueCount: 0,
+        clearedMarks,
+        appliedMarks: 0,
+        skippedSelectionCount: 0,
+        surroundFailureCount: 0,
+        elapsedMs: getElapsedMs(startedAt),
+      });
       return;
     }
 
@@ -328,6 +348,8 @@ export class AnnotationManager {
     // but TreeWalker only sees raw text nodes. We correlate each
     // text node to its position in innerText via sequential indexOf.
     const textNodes = this.buildNodeMap();
+    let skippedSelectionCount = 0;
+    let surroundFailureCount = 0;
 
     for (const issue of sorted) {
       const resolvedRange = resolveIssueRange(fullText, issue);
@@ -337,6 +359,7 @@ export class AnnotationManager {
       const issueEnd = resolvedRange.end;
 
       if (this.intersectsActiveSelection(issueStart, issueEnd, selectionBefore)) {
+        skippedSelectionCount += 1;
         continue;
       }
 
@@ -393,6 +416,7 @@ export class AnnotationManager {
           this.marks.push(mark);
         } catch {
           // surroundContents can fail on cross-boundary ranges
+          surroundFailureCount += 1;
         }
 
         break;
@@ -400,5 +424,21 @@ export class AnnotationManager {
     }
 
     this.restoreSelection(selectionBefore, this.buildNodeMap());
+    logHistoryEvent('checker:annotate', {
+      ...getAnnotationElementLogData(this.element),
+      issueCount: issues.length,
+      clearedMarks,
+      appliedMarks: this.marks.length,
+      skippedSelectionCount,
+      surroundFailureCount,
+      elapsedMs: getElapsedMs(startedAt),
+    }, { level: surroundFailureCount > 0 ? 'warn' : 'debug' });
   }
+}
+
+function getAnnotationElementLogData(element: HTMLElement): Record<string, unknown> {
+  return {
+    descriptor: element.id ? `${element.tagName.toLowerCase()}#${element.id}` : element.tagName.toLowerCase(),
+    textLength: element.innerText.length,
+  };
 }

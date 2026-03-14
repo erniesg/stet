@@ -39,6 +39,27 @@ export function isAnnotatableEditable(element: HTMLElement): boolean {
   return isTopLevelContentEditable(element);
 }
 
+export function supportsInlineAnnotationMarkup(element: HTMLElement): boolean {
+  if (element instanceof HTMLTextAreaElement || element instanceof HTMLInputElement) {
+    return true;
+  }
+
+  if (!hasEnabledContentEditable(element)) return false;
+
+  const walker = document.createTreeWalker(element, NodeFilter.SHOW_ELEMENT, {
+    acceptNode(node) {
+      if (!(node instanceof HTMLElement)) return NodeFilter.FILTER_SKIP;
+      if (node === element) return NodeFilter.FILTER_SKIP;
+      if (node.tagName === 'BR' || node.tagName === 'STET-MARK') {
+        return NodeFilter.FILTER_SKIP;
+      }
+      return NodeFilter.FILTER_ACCEPT;
+    },
+  });
+
+  return walker.nextNode() === null;
+}
+
 export function findAnnotatableEditable(start: EventTarget | null): HTMLElement | null {
   if (!(start instanceof HTMLElement)) return null;
   const editable = findTopLevelContentEditable(start);
@@ -46,18 +67,15 @@ export function findAnnotatableEditable(start: EventTarget | null): HTMLElement 
 }
 
 export function findHistoryEditable(start: EventTarget | null): HTMLElement | null {
-  if (!(start instanceof HTMLElement)) return null;
+  const startElement = toHistoryElement(start);
+  if (!startElement) return null;
 
-  const directTextarea = start instanceof HTMLTextAreaElement ? start : null;
-  if (directTextarea && isHistoryTextarea(directTextarea)) return directTextarea;
-
-  const textarea = start.closest('textarea');
-  if (textarea instanceof HTMLTextAreaElement && isHistoryTextarea(textarea)) {
-    return textarea;
-  }
-
-  const editable = findTopLevelContentEditable(start);
-  return editable && isTopLevelContentEditable(editable) ? editable : null;
+  return (
+    findDirectHistoryEditable(startElement) ??
+    findSelectionHistoryEditable(startElement) ??
+    findHistoryEditableInElementShell(startElement) ??
+    findHistoryEditableInAncestorShells(startElement)
+  );
 }
 
 export function discoverAnnotatableEditables(root: ParentNode = document): HTMLElement[] {
@@ -278,6 +296,62 @@ function dispatchEditableEvents(element: HTMLElement) {
   element.dispatchEvent(new Event('change', { bubbles: true }));
 }
 
+function toHistoryElement(start: EventTarget | null): HTMLElement | null {
+  if (start instanceof HTMLElement) return start;
+  if (typeof Node !== 'undefined' && start instanceof Node) {
+    return start.parentElement;
+  }
+  return null;
+}
+
+function findDirectHistoryEditable(start: HTMLElement): HTMLElement | null {
+  const directTextarea = start instanceof HTMLTextAreaElement ? start : null;
+  if (directTextarea && isHistoryTextarea(directTextarea)) return directTextarea;
+
+  const textarea = start.closest('textarea');
+  if (textarea instanceof HTMLTextAreaElement && isHistoryTextarea(textarea)) {
+    return textarea;
+  }
+
+  const editable = findTopLevelContentEditable(start);
+  return editable && isTopLevelContentEditable(editable) ? editable : null;
+}
+
+function findSelectionHistoryEditable(start: HTMLElement): HTMLElement | null {
+  const selection = start.ownerDocument.getSelection?.();
+  const anchorElement = toHistoryElement(selection?.anchorNode ?? null);
+  if (!anchorElement) return null;
+  if (!start.contains(anchorElement) && !anchorElement.contains(start)) return null;
+  return findDirectHistoryEditable(anchorElement);
+}
+
+function findOwnedHistoryEditable(owner: HTMLElement): HTMLElement | null {
+  const candidates = discoverHistoryEditables(owner).filter((candidate) => candidate !== owner);
+  return candidates.length === 1 ? candidates[0] : null;
+}
+
+function findHistoryEditableInElementShell(start: HTMLElement): HTMLElement | null {
+  if (!isLikelyEditorShell(start)) return null;
+  return findOwnedHistoryEditable(start);
+}
+
+function findHistoryEditableInAncestorShells(start: HTMLElement): HTMLElement | null {
+  let depth = 0;
+  let node = start.parentElement;
+
+  while (node && node !== document.body && depth < 4) {
+    if (isLikelyEditorShell(node)) {
+      const candidate = findOwnedHistoryEditable(node);
+      if (candidate) return candidate;
+    }
+
+    node = node.parentElement;
+    depth += 1;
+  }
+
+  return null;
+}
+
 function buildContentEditableNodeMap(
   element: HTMLElement,
 ): { node: Text; start: number; end: number }[] {
@@ -359,18 +433,32 @@ function isHistoryTextarea(element: HTMLTextAreaElement): boolean {
   if (element.disabled || element.readOnly) return false;
   if (element.getAttribute('aria-hidden') === 'true') return false;
 
-  const style = window.getComputedStyle(element);
-  if (style.display === 'none' || style.visibility === 'hidden') return false;
+  return isVisibleEditableRegion(element, { minWidth: 80, minHeight: 28 });
+}
 
-  const rect = element.getBoundingClientRect();
-  return rect.width >= 80 && rect.height >= 28;
+function isLikelyEditorShell(element: HTMLElement): boolean {
+  const role = element.getAttribute('role')?.trim().toLowerCase();
+  if (role === 'textbox') return true;
+
+  const markers = [
+    element.className,
+    element.id,
+    element.getAttribute('data-testid'),
+    element.getAttribute('data-qa'),
+    element.getAttribute('aria-label'),
+  ]
+    .filter((value): value is string => typeof value === 'string' && value.length > 0)
+    .join(' ')
+    .toLowerCase();
+
+  return /(editor|compose|composer|draft|editable|rich|field|headline|title|story|body)/.test(markers);
 }
 
 function isTopLevelContentEditable(element: HTMLElement): boolean {
-  if (!element.isContentEditable) return false;
-  if (element.getAttribute('contenteditable') === 'false') return false;
+  if (!hasEnabledContentEditable(element)) return false;
   if (element.getAttribute('aria-hidden') === 'true') return false;
-  return !element.parentElement?.isContentEditable;
+  if (!isVisibleEditableRegion(element, { minWidth: 40, minHeight: 18 })) return false;
+  return !element.parentElement || !hasEnabledContentEditable(element.parentElement);
 }
 
 function findTopLevelContentEditable(start: HTMLElement): HTMLElement | null {
@@ -378,13 +466,32 @@ function findTopLevelContentEditable(start: HTMLElement): HTMLElement | null {
   let candidate: HTMLElement | null = null;
 
   while (node) {
-    if (node.isContentEditable && node.getAttribute('contenteditable') !== 'false') {
+    if (hasEnabledContentEditable(node)) {
       candidate = node;
     }
     node = node.parentElement;
   }
 
   return candidate && isTopLevelContentEditable(candidate) ? candidate : null;
+}
+
+function hasEnabledContentEditable(element: HTMLElement): boolean {
+  const attribute = element.getAttribute('contenteditable');
+  if (attribute === 'false') return false;
+  if (attribute === '' || attribute === 'true' || attribute === 'plaintext-only') return true;
+  return element.isContentEditable;
+}
+
+function isVisibleEditableRegion(
+  element: HTMLElement,
+  options: { minWidth: number; minHeight: number },
+): boolean {
+  const style = window.getComputedStyle(element);
+  if (style.display === 'none' || style.visibility === 'hidden') return false;
+  if (style.pointerEvents === 'none') return false;
+
+  const rect = element.getBoundingClientRect();
+  return rect.width >= options.minWidth && rect.height >= options.minHeight;
 }
 
 function buildEditableDescriptor(element: HTMLElement): string {
@@ -444,9 +551,17 @@ function getEditableLabel(element: HTMLElement): string {
 function getAssociatedLabelText(element: HTMLElement): string | null {
   if (!element.id) return null;
 
-  const label = document.querySelector(`label[for="${CSS.escape(element.id)}"]`);
+  const label = document.querySelector(`label[for="${escapeCssValue(element.id)}"]`);
   const text = label?.textContent?.trim();
   return text ? collapseWhitespace(text) : null;
+}
+
+function escapeCssValue(value: string): string {
+  if (typeof CSS !== 'undefined' && typeof CSS.escape === 'function') {
+    return CSS.escape(value);
+  }
+
+  return value.replace(/["\\]/g, '\\$&');
 }
 
 function sanitizeSegment(value: string): string {
@@ -481,20 +596,28 @@ function sanitizeIdentityValue(value: string | null | undefined): string | null 
 function buildStableIdentitySignature(
   signals: EditableHistoryIdentitySignals,
 ): string {
-  const parts = [
-    ['label', signals.label],
-    ['id', signals.id],
+  const semanticParts: Array<[string, string | null]> = [
     ['name', signals.name],
     ['aria', signals.ariaLabel],
     ['placeholder', signals.placeholder],
     ['testid', signals.dataTestId],
-    ['role', signals.role],
-    ['container', signals.containerHint],
-  ]
+  ].filter((entry): entry is [string, string | null] => Boolean(entry[1]));
+
+  const parts: Array<[string, string | null]> = [['label', signals.label]];
+
+  if (semanticParts.length > 0) {
+    parts.push(...semanticParts);
+  } else if (signals.id) {
+    parts.push(['id', signals.id]);
+  } else {
+    parts.push(['role', signals.role], ['container', signals.containerHint]);
+  }
+
+  const normalizedParts = parts
     .filter(([, value]) => Boolean(value))
     .map(([key, value]) => `${key}:${value}`);
 
-  return parts.join('|');
+  return normalizedParts.join('|');
 }
 
 function hasStrongIdentitySignal(signals: EditableHistoryIdentitySignals): boolean {
