@@ -17,6 +17,8 @@ import {
   discoverAnnotatableEditables,
   findAnnotatableEditable,
   getEditableTarget,
+  notifyEditableChanged,
+  replaceEditableRange,
   replaceEditableText,
 } from './editable-target.js';
 import { resolveIssueApplyRange } from './issue-range.js';
@@ -307,10 +309,21 @@ async function applySelectedFixes(element: HTMLElement, selectedIssueKeys: strin
     .filter((issue) => issue.canFix && typeof issue.suggestion === 'string')
     .sort((left, right) => right.offset - left.offset);
 
+  let usedFullReplacement = false;
+
   for (const issue of selected) {
     const range = resolveIssueApplyRange(text, issue);
     if (!range) continue;
     if (range.end > nextLockedStart) continue;
+
+    if (element.isContentEditable) {
+      const replaced = replaceEditableRange(element, range.start, range.end, issue.suggestion!);
+      if (!replaced) {
+        usedFullReplacement = true;
+      }
+    } else {
+      usedFullReplacement = true;
+    }
 
     text = `${text.slice(0, range.start)}${issue.suggestion!}${text.slice(range.end)}`;
     nextLockedStart = range.start;
@@ -318,7 +331,11 @@ async function applySelectedFixes(element: HTMLElement, selectedIssueKeys: strin
   }
 
   if (applied > 0) {
-    replaceEditableText(element, text);
+    if (usedFullReplacement) {
+      replaceEditableText(element, text);
+    } else {
+      notifyEditableChanged(element);
+    }
     runCheckAndAnnotate(element);
   }
 

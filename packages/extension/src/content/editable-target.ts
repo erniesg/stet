@@ -119,6 +119,95 @@ export function replaceEditableText(element: HTMLElement, text: string): void {
   dispatchEditableEvents(element);
 }
 
+export function replaceEditableRange(
+  element: HTMLElement,
+  start: number,
+  end: number,
+  replacement: string,
+): boolean {
+  if (element instanceof HTMLTextAreaElement || element instanceof HTMLInputElement) {
+    const current = element.value;
+    const next = `${current.slice(0, start)}${replacement}${current.slice(end)}`;
+    replaceEditableText(element, next);
+    return true;
+  }
+
+  const textNodes = buildContentEditableNodeMap(element);
+  if (textNodes.length === 0) return false;
+
+  try {
+    const doc = element.ownerDocument;
+    const startPoint = resolveOffsetToDomPoint(start, textNodes, element);
+    const endPoint = resolveOffsetToDomPoint(end, textNodes, element);
+    const selection = doc.getSelection();
+
+    element.focus();
+
+    if (startPoint.node === endPoint.node && startPoint.node instanceof Text) {
+      const node = startPoint.node;
+      const current = node.textContent || '';
+      node.textContent =
+        `${current.slice(0, startPoint.offset)}${replacement}${current.slice(endPoint.offset)}`;
+
+      if (selection) {
+        const caretRange = doc.createRange();
+        const nextOffset = Math.min(node.textContent?.length ?? 0, startPoint.offset + replacement.length);
+        caretRange.setStart(node, nextOffset);
+        caretRange.collapse(true);
+        selection.removeAllRanges();
+        selection.addRange(caretRange);
+      }
+
+      return true;
+    }
+
+    if (selection) {
+      const selectionRange = doc.createRange();
+      selectionRange.setStart(startPoint.node, startPoint.offset);
+      selectionRange.setEnd(endPoint.node, endPoint.offset);
+      selection.removeAllRanges();
+      selection.addRange(selectionRange);
+
+      let applied = false;
+      if (typeof doc.execCommand === 'function') {
+        try {
+          applied = doc.execCommand('insertText', false, replacement);
+        } catch {
+          applied = false;
+        }
+      }
+
+      if (applied) return true;
+    }
+
+    const range = doc.createRange();
+    range.setStart(startPoint.node, startPoint.offset);
+    range.setEnd(endPoint.node, endPoint.offset);
+    range.deleteContents();
+
+    if (replacement.length > 0) {
+      const textNode = doc.createTextNode(replacement);
+      range.insertNode(textNode);
+
+      if (selection) {
+        const caretRange = doc.createRange();
+        caretRange.setStart(textNode, textNode.textContent?.length ?? 0);
+        caretRange.collapse(true);
+        selection.removeAllRanges();
+        selection.addRange(caretRange);
+      }
+    }
+
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function notifyEditableChanged(element: HTMLElement): void {
+  dispatchEditableEvents(element);
+}
+
 function dispatchEditableEvents(element: HTMLElement) {
   try {
     element.dispatchEvent(new InputEvent('input', {
@@ -132,6 +221,60 @@ function dispatchEditableEvents(element: HTMLElement) {
   }
 
   element.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
+function buildContentEditableNodeMap(
+  element: HTMLElement,
+): { node: Text; start: number; end: number }[] {
+  const innerText = element.innerText || '';
+  const entries: { node: Text; start: number; end: number }[] = [];
+  const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+
+  let searchFrom = 0;
+  let node: Text | null;
+
+  while ((node = walker.nextNode() as Text | null)) {
+    const content = node.textContent || '';
+    if (!content) continue;
+    if (!content.trim() && !content.includes('\u00a0')) continue;
+
+    const idx = innerText.indexOf(content, searchFrom);
+    if (idx >= 0) {
+      entries.push({ node, start: idx, end: idx + content.length });
+      searchFrom = idx + content.length;
+    }
+  }
+
+  return entries;
+}
+
+function resolveOffsetToDomPoint(
+  offset: number,
+  textNodes: { node: Text; start: number; end: number }[],
+  element: HTMLElement,
+): { node: Node; offset: number } {
+  if (textNodes.length === 0) {
+    return { node: element, offset: 0 };
+  }
+
+  const clampedOffset = Math.max(0, offset);
+  for (const entry of textNodes) {
+    if (clampedOffset <= entry.end) {
+      return {
+        node: entry.node,
+        offset: Math.max(
+          0,
+          Math.min(entry.node.textContent?.length ?? 0, clampedOffset - entry.start),
+        ),
+      };
+    }
+  }
+
+  const last = textNodes[textNodes.length - 1];
+  return {
+    node: last.node,
+    offset: last.node.textContent?.length ?? 0,
+  };
 }
 
 function discoverEditables(root: ParentNode): HTMLElement[] {
