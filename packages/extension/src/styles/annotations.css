@@ -327,18 +327,28 @@ stet-mark:hover {
   flex-direction: column;
   gap: 3px;
   padding: 10px 12px;
+  appearance: none;
   border: 1px solid #dbe4ee;
   border-radius: 12px;
   background: #fff;
   color: #0f172a;
   cursor: pointer;
   text-align: left;
+  box-shadow: none;
 }
 
 .stet-history-list-item:hover,
 .stet-history-list-item.is-selected {
   border-color: rgba(37, 99, 235, 0.42);
   background: #eff6ff;
+}
+
+.stet-history-list-item:focus {
+  outline: none;
+}
+
+.stet-history-list-item:focus-visible {
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.18);
 }
 
 .stet-history-list-line {
@@ -371,15 +381,13 @@ stet-mark:hover {
   min-height: 150px;
   max-height: 280px;
   overflow: auto;
-  padding: 14px;
+  padding: 10px;
   border: 1px solid #e2e8f0;
   border-radius: 12px;
   background: #f8fafc;
   font-size: 12px;
   line-height: 1.6;
   color: #0f172a;
-  white-space: pre-wrap;
-  word-break: break-word;
 }
 
 .stet-history-preview-note {
@@ -387,16 +395,38 @@ stet-mark:hover {
   color: #64748b;
 }
 
-.stet-history-insert {
-  background: rgba(34, 197, 94, 0.16);
-  color: #166534;
-  text-decoration: none;
+.stet-history-diff-line {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr);
+  gap: 8px;
+  padding: 2px 6px;
+  border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
-.stet-history-delete {
-  background: rgba(239, 68, 68, 0.16);
+.stet-history-diff-line.is-equal {
+  color: #475569;
+}
+
+.stet-history-diff-line.is-insert {
+  background: rgba(34, 197, 94, 0.14);
+  color: #166534;
+}
+
+.stet-history-diff-line.is-delete {
+  background: rgba(239, 68, 68, 0.14);
   color: #991b1b;
-  text-decoration: line-through;
+}
+
+.stet-history-diff-marker {
+  font-weight: 700;
+  text-align: center;
+}
+
+.stet-history-diff-text {
+  min-width: 0;
 }
 
 .stet-history-primary-btn,

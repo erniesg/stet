@@ -165,7 +165,7 @@ describe('editable identity derivation', () => {
       id: 'body-a',
       ariaLabel: 'Story body',
       dataTestId: 'story-body',
-      containerHint: 'section#story-editor > div.editor-shell',
+      containerHint: 'section[id="story-editor"]',
     });
 
     const remounted = deriveEditableIdentity({
@@ -175,11 +175,33 @@ describe('editable identity derivation', () => {
       id: 'body-b',
       ariaLabel: 'Story body',
       dataTestId: 'story-body',
-      containerHint: 'section#story-editor > div.editor-shell.remounted',
+      containerHint: 'section[id="story-editor"]',
     });
 
     expect(remounted.source).toBe('stable');
     expect(remounted.fieldKey).toBe(first.fieldKey);
+  });
+
+  it('uses stable container hints to disambiguate repeated editors with the same placeholder', () => {
+    const first = deriveEditableIdentity({
+      url: 'https://cms.example.com/story/1',
+      descriptor: 'section#comments > div:nth-of-type(1) > textarea',
+      label: 'Reply',
+      placeholder: 'Write a reply',
+      containerHint: 'section[id="comments"] > article[data-testid="comment-1"]',
+    });
+
+    const second = deriveEditableIdentity({
+      url: 'https://cms.example.com/story/1',
+      descriptor: 'section#comments > div:nth-of-type(2) > textarea',
+      label: 'Reply',
+      placeholder: 'Write a reply',
+      containerHint: 'section[id="comments"] > article[data-testid="comment-2"]',
+    });
+
+    expect(first.source).toBe('stable');
+    expect(second.source).toBe('stable');
+    expect(first.fieldKey).not.toBe(second.fieldKey);
   });
 });
 
