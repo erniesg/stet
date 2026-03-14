@@ -1,5 +1,23 @@
 export type SnapshotSource = 'autosave' | 'manual' | 'restore' | 'blur';
 
+export interface EditableHistoryIdentitySignals {
+  label: string | null;
+  id: string | null;
+  name: string | null;
+  ariaLabel: string | null;
+  placeholder: string | null;
+  dataTestId: string | null;
+  role: string | null;
+  containerHint: string | null;
+}
+
+export interface EditableHistoryIdentity {
+  descriptorKey: string;
+  stableKey: string | null;
+  source: 'stable' | 'descriptor';
+  signals: EditableHistoryIdentitySignals;
+}
+
 export interface VersionSnapshot {
   id: string;
   savedAt: string;
@@ -17,6 +35,7 @@ export interface EditableHistoryRecord {
   descriptor: string;
   kind: 'textarea' | 'contenteditable';
   url: string;
+  identity?: EditableHistoryIdentity;
   createdAt: string;
   updatedAt: string;
   snapshots: VersionSnapshot[];
@@ -44,6 +63,14 @@ export interface HistoryPolicy {
 export interface ChangeSummary {
   changedChars: number;
   changeRatio: number;
+}
+
+export interface RestoreVerification {
+  ok: boolean;
+  changedChars: number;
+  changeRatio: number;
+  expectedLength: number;
+  actualLength: number;
 }
 
 export interface ShouldSaveSnapshotOptions {
@@ -196,6 +223,20 @@ export function pruneSnapshots(
 
 export function estimateRecordBytes(record: EditableHistoryRecord): number {
   return JSON.stringify(record).length * 2;
+}
+
+export function verifyRestoredContent(expectedText: string, actualText: string): RestoreVerification {
+  const normalizedExpected = normalizeText(expectedText);
+  const normalizedActual = normalizeText(actualText);
+  const summary = summarizeChange(normalizedExpected, normalizedActual);
+
+  return {
+    ok: normalizedExpected === normalizedActual,
+    changedChars: summary.changedChars,
+    changeRatio: summary.changeRatio,
+    expectedLength: normalizedExpected.length,
+    actualLength: normalizedActual.length,
+  };
 }
 
 function normalizeText(text: string): string {

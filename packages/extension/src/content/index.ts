@@ -13,4 +13,4 @@ void commonPack;
 
 // Start
 initChecker(loadCommonDictionary);
-initVersionHistory();
+void initVersionHistory();

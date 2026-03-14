@@ -3,7 +3,13 @@
  * Handles: settings, FX rate caching, badge updates, LLM proxy.
  */
 
-import { loadSettings, saveSettings, getEffectiveConfig, DEFAULT_STORED_SETTINGS } from '../storage/settings.js';
+import {
+  loadSettings,
+  saveSettings,
+  getEffectiveConfig,
+  getHistorySettings,
+  DEFAULT_STORED_SETTINGS,
+} from '../storage/settings.js';
 
 interface PopupIssueRecord {
   key: string;
@@ -177,6 +183,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     case 'GET_RAW_SETTINGS':
       // Return the raw stored settings (for options page)
       loadSettings().then((settings) => sendResponse(settings));
+      return true;
+
+    case 'GET_HISTORY_SETTINGS':
+      getHistorySettings().then((history) => sendResponse({ history }));
       return true;
 
     case 'UPDATE_USER_OVERRIDES':

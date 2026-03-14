@@ -9,8 +9,25 @@ import {
   DEFAULT_HISTORY_POLICY,
   type EditableHistoryRecord,
   type VersionSnapshot,
+  verifyRestoredContent,
 } from './version-history-core.js';
-import { loadHistoryRecord, saveSnapshotForTarget } from './version-history-store.js';
+import { loadHistoryRecordForTarget, saveSnapshotForTarget } from './version-history-store.js';
+import {
+  flushHistoryEventRates,
+  getElapsedMs,
+  getHistoryTargetLogData,
+  getNow,
+  isHistoryDebugEnabled,
+  isHistoryRuntimeDisabled,
+  logHistoryEvent,
+  recordHistoryEventRate,
+} from './version-history-debug.js';
+import { computeFieldHistoryLayout } from './version-history-layout.js';
+import {
+  resolveHistoryRuntimeConfig,
+  type HistoryRuntimeConfig,
+  type HistoryUiMode,
+} from '../history-settings.js';
 
 class HistorySession {
   public record: EditableHistoryRecord | null = null;
@@ -23,13 +40,16 @@ class HistorySession {
 
   constructor(
     public readonly target: EditableTarget,
+    private readonly debug: boolean,
     private readonly onChange: () => void,
   ) {
     this.handleInputBound = () => {
+      recordHistoryEventRate('input', { fieldKey: this.target.fieldKey }, this.debug);
       void this.ensureLoaded();
       this.scheduleAutosave();
     };
     this.handleBlurBound = () => {
+      recordHistoryEventRate('blur', { fieldKey: this.target.fieldKey }, this.debug);
       void this.persist('blur', true);
     };
 
@@ -40,7 +60,7 @@ class HistorySession {
   async ensureLoaded(): Promise<EditableHistoryRecord | null> {
     if (this.record) return this.record;
     if (!this.loadPromise) {
-      this.loadPromise = loadHistoryRecord(this.target.storageKey)
+      this.loadPromise = loadHistoryRecordForTarget(this.target, this.debug)
         .then((record) => {
           this.record = record;
           this.onChange();
@@ -68,6 +88,7 @@ class HistorySession {
         source,
         DEFAULT_HISTORY_POLICY,
         force,
+        this.debug,
       );
       this.record = record;
       this.onChange();
@@ -107,11 +128,24 @@ class HistorySession {
 }
 
 export function initVersionHistory() {
-  const manager = new VersionHistoryManager();
-  manager.init();
+  void loadHistoryRuntime().then((runtime) => {
+    logHistoryEvent('history:init', {
+      enabled: runtime.enabled,
+      requestedUiMode: runtime.requestedUiMode,
+      allowAnchoredUi: runtime.allowAnchoredUi,
+      reason: runtime.reason,
+    }, { debug: runtime.debug });
+
+    if (!runtime.enabled) return;
+
+    const manager = new VersionHistoryManager(runtime);
+    manager.init();
+  });
 }
 
 class VersionHistoryManager {
+  constructor(private readonly runtime: HistoryRuntimeConfig) {}
+
   private readonly sessions = new Map<HTMLElement, HistorySession>();
   private activeSession: HistorySession | null = null;
   private selectedSnapshotId: string | null = null;
@@ -130,8 +164,17 @@ class VersionHistoryManager {
   private readonly previewDiff = document.createElement('div');
   private readonly restoreButton = document.createElement('button');
   private readonly emptyState = document.createElement('div');
+  private repositionFrame: number | null = null;
+  private pendingPositionSource: string | null = null;
 
   init() {
+    if (this.runtime.requestedUiMode === 'field' && !this.isFieldMode) {
+      logHistoryEvent('history:mode-fallback', {
+        allowAnchoredUi: this.runtime.allowAnchoredUi,
+        reason: this.runtime.reason ?? 'field-ui-host-blocked',
+      }, { debug: this.runtime.debug });
+    }
+
     this.buildUi();
     this.attachExistingEditables();
     this.observeDom();
@@ -140,17 +183,21 @@ class VersionHistoryManager {
     document.addEventListener('keydown', this.handleKeyDown, true);
     document.addEventListener('visibilitychange', this.handleVisibilityChange, true);
     window.addEventListener('pagehide', this.handlePageHide, true);
+    if (this.isFieldMode) {
+      window.addEventListener('resize', this.handleViewportShift, true);
+      window.addEventListener('scroll', this.handleViewportShift, true);
+    }
 
     const active = findHistoryEditable(document.activeElement);
     if (active) {
-      this.activateElement(active);
+      this.activateElement(active, 'init');
     } else {
       this.renderButton();
     }
   }
 
   private buildUi() {
-    this.root.className = 'stet-history-root';
+    this.root.className = `stet-history-root${this.isFieldMode ? ' is-field-mode' : ''}`;
 
     this.button.className = 'stet-history-button';
     this.button.type = 'button';
@@ -163,7 +210,7 @@ class VersionHistoryManager {
     });
 
     this.buttonTitle.className = 'stet-history-button-title';
-    this.buttonTitle.textContent = 'Version history';
+    this.buttonTitle.textContent = this.isFieldMode ? 'History' : 'Version history';
     this.buttonMeta.className = 'stet-history-button-meta';
 
     this.button.append(this.buttonTitle, this.buttonMeta);
@@ -250,19 +297,22 @@ class VersionHistoryManager {
     this.root.append(this.button, this.panel);
 
     (document.body ?? document.documentElement).appendChild(this.root);
+
+    logHistoryEvent('history:mount', {}, { debug: this.runtime.debug });
+    this.updateFloatingPosition('mount', true);
   }
 
   private attachExistingEditables() {
-    discoverHistoryEditables().forEach((element) => this.attachEditable(element));
+    discoverHistoryEditables().forEach((element) => this.attachEditable(element, 'initial-scan'));
   }
 
-  private attachEditable(element: HTMLElement) {
+  private attachEditable(element: HTMLElement, source: string) {
     if (this.sessions.has(element)) return;
 
     const target = getEditableTarget(element);
     if (!target) return;
 
-    const session = new HistorySession(target, () => {
+    const session = new HistorySession(target, this.runtime.debug, () => {
       if (this.activeSession === session) {
         this.renderButton();
         if (this.isPanelOpen) this.renderPanel();
@@ -270,14 +320,23 @@ class VersionHistoryManager {
     });
 
     this.sessions.set(element, session);
+    logHistoryEvent('history:bind', {
+      ...getHistoryTargetLogData(target),
+      source,
+    }, { debug: this.runtime.debug });
   }
 
-  private activateElement(element: HTMLElement) {
-    this.attachEditable(element);
+  private activateElement(element: HTMLElement, source: string) {
+    this.attachEditable(element, source);
     const session = this.sessions.get(element);
     if (!session) return;
 
     this.activeSession = session;
+    logHistoryEvent('history:activate', {
+      ...getHistoryTargetLogData(session.target),
+      source,
+    }, { debug: this.runtime.debug });
+
     void session.ensureLoaded().then(() => {
       if (this.activeSession !== session) return;
       this.ensureSelectedSnapshot();
@@ -287,6 +346,7 @@ class VersionHistoryManager {
 
     this.ensureSelectedSnapshot();
     this.renderButton();
+    this.updateFloatingPosition(source, true);
   }
 
   private async openPanel() {
@@ -294,15 +354,22 @@ class VersionHistoryManager {
 
     this.isPanelOpen = true;
     this.panel.hidden = false;
+    this.updateFloatingPosition('open-pending');
 
     await this.activeSession.ensureLoaded();
     this.ensureSelectedSnapshot(true);
     this.renderPanel();
+    logHistoryEvent('history:open', {
+      ...getHistoryTargetLogData(this.activeSession.target),
+    }, { debug: this.runtime.debug });
+    this.updateFloatingPosition('open', true);
   }
 
   private closePanel() {
     this.isPanelOpen = false;
     this.panel.hidden = true;
+    logHistoryEvent('history:close', {}, { debug: this.runtime.debug });
+    this.updateFloatingPosition('close', true);
   }
 
   private ensureSelectedSnapshot(force = false) {
@@ -332,7 +399,10 @@ class VersionHistoryManager {
     const hasActiveElement = session?.target.element.isConnected ?? false;
 
     this.button.hidden = !hasActiveElement;
-    if (!hasActiveElement || !session) return;
+    if (!hasActiveElement || !session) {
+      this.updateFloatingPosition('render-button');
+      return;
+    }
 
     const versions = session.record?.snapshots ?? [];
     const latest = versions.at(-1);
@@ -340,6 +410,8 @@ class VersionHistoryManager {
     this.buttonMeta.textContent = latest
       ? `${versions.length} version${versions.length === 1 ? '' : 's'} · ${formatRelativeTime(latest.savedAt)}`
       : 'No local versions yet';
+
+    this.updateFloatingPosition('render-button');
   }
 
   private renderPanel() {
@@ -380,6 +452,7 @@ class VersionHistoryManager {
       this.previewSummary.textContent = 'Pick a saved version to preview the full restore diff.';
       this.previewDiff.innerHTML = '';
       this.restoreButton.disabled = true;
+      this.updateFloatingPosition('render-panel');
       return;
     }
 
@@ -393,6 +466,7 @@ class VersionHistoryManager {
 
     this.previewDiff.innerHTML = renderDiffHtml(diff.chunks);
     this.restoreButton.disabled = unchanged;
+    this.updateFloatingPosition('render-panel');
   }
 
   private async captureManualSnapshot() {
@@ -415,7 +489,24 @@ class VersionHistoryManager {
     const ok = window.confirm('Replace the entire editor contents with the selected saved version?');
     if (!ok) return;
 
+    const startedAt = getNow();
     session.target.write(snapshot.content);
+    const verification = verifyRestoredContent(snapshot.content, session.target.read());
+    logHistoryEvent('history:restore', {
+      ...getHistoryTargetLogData(session.target),
+      snapshotId: snapshot.id,
+      ...verification,
+      elapsedMs: getElapsedMs(startedAt),
+    }, {
+      debug: this.runtime.debug,
+      level: verification.ok ? 'debug' : 'warn',
+    });
+
+    if (!verification.ok) {
+      this.previewSummary.textContent = 'Restore could not be verified on this editor. Stet did not save a restore point.';
+      return;
+    }
+
     await session.persist('restore', true);
     this.ensureSelectedSnapshot(true);
     this.renderPanel();
@@ -423,10 +514,14 @@ class VersionHistoryManager {
 
   private observeDom() {
     const observer = new MutationObserver((mutations) => {
+      recordHistoryEventRate('mutation', {
+        mutationCount: mutations.length,
+      }, this.runtime.debug);
+
       for (const mutation of mutations) {
         mutation.addedNodes.forEach((node) => {
           if (!(node instanceof HTMLElement)) return;
-          discoverHistoryEditables(node).forEach((element) => this.attachEditable(element));
+          discoverHistoryEditables(node).forEach((element) => this.attachEditable(element, 'mutation'));
         });
 
         mutation.removedNodes.forEach((node) => {
@@ -449,6 +544,10 @@ class VersionHistoryManager {
       if (element === root || root.contains(element)) {
         session.destroy();
         this.sessions.delete(element);
+        logHistoryEvent('history:unbind', {
+          ...getHistoryTargetLogData(session.target),
+          reason: 'dom-remove',
+        }, { debug: this.runtime.debug });
         if (this.activeSession === session) {
           this.activeSession = null;
           this.selectedSnapshotId = null;
@@ -464,6 +563,10 @@ class VersionHistoryManager {
       if (element.isConnected) continue;
       session.destroy();
       this.sessions.delete(element);
+      logHistoryEvent('history:unbind', {
+        ...getHistoryTargetLogData(session.target),
+        reason: 'disconnect',
+      }, { debug: this.runtime.debug });
       if (this.activeSession === session) {
         this.activeSession = null;
         this.selectedSnapshotId = null;
@@ -474,9 +577,10 @@ class VersionHistoryManager {
   }
 
   private readonly handleFocusIn = (event: FocusEvent) => {
+    recordHistoryEventRate('focusin', {}, this.runtime.debug);
     const editable = findHistoryEditable(event.target);
     if (!editable) return;
-    this.activateElement(editable);
+    this.activateElement(editable, 'focusin');
   };
 
   private readonly handleKeyDown = (event: KeyboardEvent) => {
@@ -494,9 +598,161 @@ class VersionHistoryManager {
     void this.flushAllSessions();
   };
 
+  private readonly handleViewportShift = () => {
+    recordHistoryEventRate('viewport', { open: this.isPanelOpen }, this.runtime.debug);
+    this.scheduleFloatingPosition('viewport');
+  };
+
   private async flushAllSessions() {
+    const startedAt = getNow();
     await Promise.all([...this.sessions.values()].map((session) => session.flushPending()));
+    flushHistoryEventRates(this.runtime.debug);
+    logHistoryEvent('history:flush', {
+      sessionCount: this.sessions.size,
+      elapsedMs: getElapsedMs(startedAt),
+    }, { debug: this.runtime.debug });
   }
+
+  private scheduleFloatingPosition(source: string) {
+    if (!this.isFieldMode) return;
+
+    this.pendingPositionSource = source;
+    if (this.repositionFrame !== null) return;
+
+    this.repositionFrame = window.requestAnimationFrame(() => {
+      const nextSource = this.pendingPositionSource ?? 'viewport';
+      this.pendingPositionSource = null;
+      this.repositionFrame = null;
+      this.updateFloatingPosition(nextSource);
+    });
+  }
+
+  private updateFloatingPosition(source: string, log = false) {
+    if (!this.isFieldMode) {
+      this.clearFloatingStyles();
+      if (log) this.logPosition(source);
+      return;
+    }
+
+    const session = this.activeSession;
+    if (!session || !session.target.element.isConnected) {
+      this.button.hidden = true;
+      this.panel.hidden = true;
+      if (log) this.logPosition(source);
+      return;
+    }
+
+    const targetRect = session.target.element.getBoundingClientRect();
+    const layout = computeFieldHistoryLayout({
+      targetRect: {
+        top: targetRect.top,
+        left: targetRect.left,
+        width: targetRect.width,
+        height: targetRect.height,
+      },
+      viewportWidth: window.innerWidth,
+      viewportHeight: window.innerHeight,
+      chipWidth: this.button.offsetWidth || 164,
+      chipHeight: this.button.offsetHeight || 44,
+      panelWidth: this.panel.offsetWidth || 420,
+      panelHeight: this.panel.hidden ? 420 : (this.panel.offsetHeight || 420),
+      panelOpen: this.isPanelOpen,
+    });
+
+    if (!layout.visible) {
+      this.button.hidden = true;
+      this.panel.hidden = true;
+      if (log) this.logPosition(source);
+      return;
+    }
+
+    this.button.hidden = false;
+    this.button.style.left = `${layout.chip.left}px`;
+    this.button.style.top = `${layout.chip.top}px`;
+    this.button.style.width = `${layout.chip.width}px`;
+
+    this.panel.hidden = !this.isPanelOpen;
+    this.panel.style.left = `${layout.panel.left}px`;
+    this.panel.style.top = `${layout.panel.top}px`;
+    this.panel.style.width = `${layout.panel.width}px`;
+    this.panel.dataset.placement = layout.panel.placement;
+
+    if (log) this.logPosition(source);
+  }
+
+  private clearFloatingStyles() {
+    this.button.style.left = '';
+    this.button.style.top = '';
+    this.button.style.width = '';
+    this.panel.style.left = '';
+    this.panel.style.top = '';
+    this.panel.style.width = '';
+    delete this.panel.dataset.placement;
+  }
+
+  private logPosition(source: string) {
+    const buttonRect = this.button.getBoundingClientRect();
+    const panelRect = this.panel.getBoundingClientRect();
+
+    logHistoryEvent('history:position', {
+      source,
+      uiMode: this.isFieldMode ? 'field' : 'page',
+      target: this.activeSession
+        ? getHistoryTargetLogData(this.activeSession.target).rect
+        : null,
+      button: {
+        top: Math.round(buttonRect.top * 10) / 10,
+        left: Math.round(buttonRect.left * 10) / 10,
+        width: Math.round(buttonRect.width * 10) / 10,
+        height: Math.round(buttonRect.height * 10) / 10,
+        hidden: this.button.hidden,
+      },
+      panel: {
+        top: Math.round(panelRect.top * 10) / 10,
+        left: Math.round(panelRect.left * 10) / 10,
+        width: Math.round(panelRect.width * 10) / 10,
+        height: Math.round(panelRect.height * 10) / 10,
+        hidden: this.panel.hidden,
+        placement: this.panel.dataset.placement ?? 'below',
+      },
+    }, { debug: this.runtime.debug });
+  }
+
+  private get isFieldMode(): boolean {
+    return this.runtime.requestedUiMode === 'field' && this.runtime.allowAnchoredUi;
+  }
+}
+
+async function loadHistoryRuntime(): Promise<HistoryRuntimeConfig> {
+  const settings = await new Promise<unknown>((resolve) => {
+    chrome.runtime.sendMessage({ type: 'GET_HISTORY_SETTINGS' }, (resp) => {
+      resolve(resp?.history ?? null);
+    });
+  }).catch(() => null);
+
+  return resolveHistoryRuntimeConfig(
+    settings as Record<string, unknown> | null,
+    { hostname: window.location.hostname },
+    {
+      disableHistory: isHistoryRuntimeDisabled(),
+      debug: isHistoryDebugEnabled(false),
+      uiModeOverride: readHistoryUiModeOverride(),
+    },
+  );
+}
+
+function readHistoryUiModeOverride(): HistoryUiMode | undefined {
+  const queryOverride = new URLSearchParams(window.location.search).get('stetHistoryUi');
+  if (queryOverride === 'off' || queryOverride === 'page' || queryOverride === 'field') {
+    return queryOverride;
+  }
+
+  const windowOverride = window.__stetHistoryUiMode;
+  if (windowOverride === 'off' || windowOverride === 'page' || windowOverride === 'field') {
+    return windowOverride;
+  }
+
+  return undefined;
 }
 
 function renderDiffHtml(chunks: ReturnType<typeof diffText>['chunks']): string {

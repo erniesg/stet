@@ -22,8 +22,14 @@ import {
   replaceEditableText,
 } from './editable-target.js';
 import { resolveIssueApplyRange } from './issue-range.js';
-import { DEFAULT_HISTORY_POLICY } from './version-history-core.js';
-import { loadHistoryRecord, saveSnapshotForTarget } from './version-history-store.js';
+import { DEFAULT_HISTORY_POLICY, verifyRestoredContent } from './version-history-core.js';
+import { loadHistoryRecordForTarget, saveSnapshotForTarget } from './version-history-store.js';
+import {
+  getElapsedMs,
+  getHistoryTargetLogData,
+  getNow,
+  logHistoryEvent,
+} from './version-history-debug.js';
 
 const managers = new Map<HTMLElement, AnnotationManager>();
 const latestIssues = new Map<HTMLElement, Issue[]>();
@@ -348,16 +354,23 @@ async function getEditorHistoryState(fieldKey: string): Promise<{
   ok: boolean;
   currentText: string;
   label: string | null;
+  record: import('./version-history-core.js').EditableHistoryRecord | null;
 }> {
   const element = findElementByFieldKey(fieldKey);
   if (!element) {
-    return { ok: false, currentText: '', label: null };
+    return { ok: false, currentText: '', label: null, record: null };
+  }
+
+  const target = getEditableTarget(element);
+  if (!target) {
+    return { ok: false, currentText: extractText(element), label: getPopupElementLabel(element), record: null };
   }
 
   return {
     ok: true,
     currentText: extractText(element),
     label: getPopupElementLabel(element),
+    record: await loadHistoryRecordForTarget(target),
   };
 }
 
@@ -387,6 +400,7 @@ async function restoreEditorSnapshot(
   ok: boolean;
   currentText: string;
   state: PopupIssueState;
+  error?: string;
 }> {
   const element = findElementByFieldKey(fieldKey);
   if (!element) {
@@ -398,19 +412,39 @@ async function restoreEditorSnapshot(
     return { ok: false, currentText: '', state: getPopupIssuesState() };
   }
 
-  const record = await loadHistoryRecord(target.storageKey);
+  const record = await loadHistoryRecordForTarget(target);
   const snapshot = record?.snapshots.find((entry) => entry.id === snapshotId);
   if (!snapshot) {
     return { ok: false, currentText: extractText(element), state: getPopupIssuesState() };
   }
 
+  const startedAt = getNow();
   replaceEditableText(element, snapshot.content);
+  const currentText = extractText(element);
+  const verification = verifyRestoredContent(snapshot.content, currentText);
+  logHistoryEvent('history:restore', {
+    ...getHistoryTargetLogData(target),
+    snapshotId,
+    ...verification,
+    elapsedMs: getElapsedMs(startedAt),
+    source: 'popup',
+  }, { level: verification.ok ? 'debug' : 'warn' });
+
+  if (!verification.ok) {
+    return {
+      ok: false,
+      currentText,
+      state: getPopupIssuesState(),
+      error: 'The editor did not accept the restored text exactly.',
+    };
+  }
+
   await saveSnapshotForTarget(target, snapshot.content, 'restore', DEFAULT_HISTORY_POLICY, true);
   runCheckAndAnnotate(element);
 
   return {
     ok: true,
-    currentText: snapshot.content,
+    currentText,
     state: getPopupIssuesState(),
   };
 }

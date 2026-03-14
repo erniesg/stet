@@ -155,6 +155,18 @@ stet-mark:hover {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
 }
 
+.stet-history-root.is-field-mode {
+  top: 0;
+  left: 0;
+  right: auto;
+  bottom: auto;
+  width: 0;
+  height: 0;
+  gap: 0;
+  align-items: flex-start;
+  pointer-events: none;
+}
+
 .stet-history-button {
   display: flex;
   flex-direction: column;
@@ -169,6 +181,18 @@ stet-mark:hover {
   cursor: pointer;
   backdrop-filter: blur(14px);
   text-align: left;
+}
+
+.stet-history-root.is-field-mode .stet-history-button {
+  position: fixed;
+  min-width: 0;
+  padding: 8px 12px;
+  border-radius: 999px;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  box-shadow: 0 14px 34px rgba(15, 23, 42, 0.16);
+  pointer-events: auto;
 }
 
 .stet-history-button:hover {
@@ -186,6 +210,17 @@ stet-mark:hover {
   color: #475569;
 }
 
+.stet-history-root.is-field-mode .stet-history-button-title {
+  font-size: 12px;
+}
+
+.stet-history-root.is-field-mode .stet-history-button-meta {
+  max-width: 180px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .stet-history-panel {
   width: min(420px, calc(100vw - 24px));
   max-height: min(78vh, 760px);
@@ -199,6 +234,12 @@ stet-mark:hover {
   background: rgba(255, 255, 255, 0.985);
   color: #0f172a;
   box-shadow: 0 30px 80px rgba(15, 23, 42, 0.2);
+}
+
+.stet-history-root.is-field-mode .stet-history-panel {
+  position: fixed;
+  width: min(420px, calc(100vw - 16px));
+  pointer-events: auto;
 }
 
 .stet-history-panel-header {
@@ -399,6 +440,17 @@ stet-mark:hover {
   .stet-history-button,
   .stet-history-panel {
     width: 100%;
+  }
+
+  .stet-history-root.is-field-mode {
+    left: 0;
+    right: auto;
+    bottom: auto;
+  }
+
+  .stet-history-root.is-field-mode .stet-history-button,
+  .stet-history-root.is-field-mode .stet-history-panel {
+    width: auto;
   }
 }
 

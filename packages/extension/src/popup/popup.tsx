@@ -42,6 +42,7 @@ interface PopupHistoryContextResponse {
   ok: boolean;
   currentText: string;
   label: string | null;
+  record: EditableHistoryRecord | null;
 }
 
 const EMPTY_ISSUES_STATE: PopupIssuesState = {
@@ -53,8 +54,6 @@ const EMPTY_ISSUES_STATE: PopupIssuesState = {
   activeLabel: null,
   issues: [],
 };
-
-const HISTORY_STORAGE_PREFIX = 'stet:history:';
 
 function formatSuggestion(issue: PopupIssue): string {
   if (typeof issue.suggestion !== 'string') return issue.originalText;
@@ -285,6 +284,7 @@ function Popup() {
       ok: boolean;
       currentText: string;
       state?: PopupIssuesState;
+      error?: string;
     }>(activeTabId, issuesState.activeFrameId, {
       type: 'RESTORE_EDITOR_SNAPSHOT',
       fieldKey: issuesState.activeFieldKey,
@@ -292,7 +292,7 @@ function Popup() {
     }).then((resp) => {
       setHistoryRestoring(false);
       if (!resp?.ok) {
-        setHistoryError('Could not restore this version.');
+        setHistoryError(resp?.error ?? 'Could not restore this version.');
         return;
       }
 
@@ -310,13 +310,11 @@ function Popup() {
     setHistoryLoading(true);
 
     try {
-      const [record, context] = await Promise.all([
-        loadStoredHistory(fieldKey),
-        sendFrameMessage<PopupHistoryContextResponse>(tabId, frameId, {
-          type: 'GET_EDITOR_HISTORY_STATE',
-          fieldKey,
-        }),
-      ]);
+      const context = await sendFrameMessage<PopupHistoryContextResponse>(tabId, frameId, {
+        type: 'GET_EDITOR_HISTORY_STATE',
+        fieldKey,
+      });
+      const record = context?.record ?? null;
 
       if (!context?.ok) {
         setHistorySnapshots([]);
@@ -612,14 +610,6 @@ function loadPageIssues(
     setActiveTabId?.(null);
     setIssuesState(EMPTY_ISSUES_STATE);
     setIssuesError('Could not find the active tab.');
-  });
-}
-
-function loadStoredHistory(fieldKey: string): Promise<EditableHistoryRecord | null> {
-  return new Promise((resolve) => {
-    chrome.storage.local.get(`${HISTORY_STORAGE_PREFIX}${fieldKey}`, (result) => {
-      resolve((result[`${HISTORY_STORAGE_PREFIX}${fieldKey}`] as EditableHistoryRecord | undefined) ?? null);
-    });
   });
 }
 

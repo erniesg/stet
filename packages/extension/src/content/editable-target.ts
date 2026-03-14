@@ -1,6 +1,23 @@
 import { extractText } from './text-extractor.js';
+import type {
+  EditableHistoryIdentity,
+  EditableHistoryIdentitySignals,
+} from './version-history-core.js';
 
 export type HistoryEditableKind = 'textarea' | 'contenteditable';
+
+export interface EditableIdentitySeed {
+  url: string;
+  descriptor: string;
+  label: string;
+  id?: string | null;
+  name?: string | null;
+  ariaLabel?: string | null;
+  placeholder?: string | null;
+  dataTestId?: string | null;
+  role?: string | null;
+  containerHint?: string | null;
+}
 
 export interface EditableTarget {
   element: HTMLElement;
@@ -10,6 +27,7 @@ export interface EditableTarget {
   descriptor: string;
   label: string;
   url: string;
+  identity: EditableHistoryIdentity;
   read(): string;
   write(text: string): void;
 }
@@ -60,19 +78,56 @@ export function getEditableTarget(element: HTMLElement): EditableTarget | null {
   if (!kind) return null;
 
   const descriptor = buildEditableDescriptor(element);
+  const label = getEditableLabel(element);
   const url = `${window.location.origin}${window.location.pathname}${window.location.search}`;
-  const fieldKey = hashString(`${url}::${descriptor}`);
+  const identity = deriveEditableIdentity({
+    url,
+    descriptor,
+    label,
+    id: element.id || null,
+    name: element.getAttribute('name'),
+    ariaLabel: element.getAttribute('aria-label'),
+    placeholder: element.getAttribute('placeholder'),
+    dataTestId: element.getAttribute('data-testid'),
+    role: element.getAttribute('role'),
+    containerHint: buildContainerHint(element),
+  });
 
   return {
     element,
     kind,
-    fieldKey,
-    storageKey: `${HISTORY_STORAGE_PREFIX}${fieldKey}`,
+    fieldKey: identity.fieldKey,
+    storageKey: `${HISTORY_STORAGE_PREFIX}${identity.fieldKey}`,
     descriptor,
-    label: getEditableLabel(element),
+    label,
     url,
+    identity: {
+      descriptorKey: identity.descriptorKey,
+      stableKey: identity.stableKey,
+      source: identity.source,
+      signals: identity.signals,
+    },
     read: () => extractText(element),
     write: (text: string) => replaceEditableText(element, text),
+  };
+}
+
+export function deriveEditableIdentity(seed: EditableIdentitySeed): EditableHistoryIdentity & {
+  fieldKey: string;
+} {
+  const signals = normalizeIdentitySignals(seed);
+  const stableKeyInput = hasStrongIdentitySignal(signals)
+    ? buildStableIdentitySignature(signals)
+    : '';
+  const stableKey = stableKeyInput ? hashString(`${seed.url}::${stableKeyInput}`) : null;
+  const descriptorKey = hashString(`${seed.url}::${seed.descriptor}`);
+
+  return {
+    fieldKey: stableKey ?? descriptorKey,
+    descriptorKey,
+    stableKey,
+    source: stableKey ? 'stable' : 'descriptor',
+    signals,
   };
 }
 
@@ -400,6 +455,84 @@ function sanitizeSegment(value: string): string {
 
 function collapseWhitespace(value: string): string {
   return value.replace(/\s+/g, ' ').trim();
+}
+
+function normalizeIdentitySignals(
+  seed: EditableIdentitySeed,
+): EditableHistoryIdentitySignals {
+  return {
+    label: sanitizeIdentityValue(seed.label),
+    id: sanitizeIdentityValue(seed.id),
+    name: sanitizeIdentityValue(seed.name),
+    ariaLabel: sanitizeIdentityValue(seed.ariaLabel),
+    placeholder: sanitizeIdentityValue(seed.placeholder),
+    dataTestId: sanitizeIdentityValue(seed.dataTestId),
+    role: sanitizeIdentityValue(seed.role),
+    containerHint: sanitizeIdentityValue(seed.containerHint),
+  };
+}
+
+function sanitizeIdentityValue(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const normalized = collapseWhitespace(value);
+  return normalized ? normalized.slice(0, 80) : null;
+}
+
+function buildStableIdentitySignature(
+  signals: EditableHistoryIdentitySignals,
+): string {
+  const parts = [
+    ['label', signals.label],
+    ['id', signals.id],
+    ['name', signals.name],
+    ['aria', signals.ariaLabel],
+    ['placeholder', signals.placeholder],
+    ['testid', signals.dataTestId],
+    ['role', signals.role],
+    ['container', signals.containerHint],
+  ]
+    .filter(([, value]) => Boolean(value))
+    .map(([key, value]) => `${key}:${value}`);
+
+  return parts.join('|');
+}
+
+function hasStrongIdentitySignal(signals: EditableHistoryIdentitySignals): boolean {
+  return Boolean(
+    signals.id ||
+    signals.name ||
+    signals.ariaLabel ||
+    signals.placeholder ||
+    signals.dataTestId ||
+    signals.containerHint,
+  );
+}
+
+function buildContainerHint(element: HTMLElement): string | null {
+  const segments: string[] = [];
+  let node = element.parentElement;
+
+  while (node && node !== document.body && segments.length < 3) {
+    const stableSegment = getStableContainerSegment(node);
+    if (stableSegment) segments.unshift(stableSegment);
+    node = node.parentElement;
+  }
+
+  return segments.length > 0 ? segments.join(' > ') : null;
+}
+
+function getStableContainerSegment(element: HTMLElement): string | null {
+  const tag = element.tagName.toLowerCase();
+  const namedAttribute = [
+    ['id', element.id],
+    ['name', element.getAttribute('name')],
+    ['data-testid', element.getAttribute('data-testid')],
+    ['aria-label', element.getAttribute('aria-label')],
+    ['role', element.getAttribute('role')],
+  ].find(([, value]) => Boolean(value?.trim()));
+
+  if (!namedAttribute) return null;
+  return `${tag}[${namedAttribute[0]}="${sanitizeSegment(namedAttribute[1]!.trim())}"]`;
 }
 
 function hashString(value: string): string {
