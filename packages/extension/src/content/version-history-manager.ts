@@ -112,19 +112,10 @@ export function initVersionHistory() {
 }
 
 class VersionHistoryManager {
-  private static readonly EDGE_MARGIN = 12;
-  private static readonly GAP = 10;
-  private static readonly FALLBACK_BUTTON_WIDTH = 196;
-  private static readonly FALLBACK_BUTTON_HEIGHT = 58;
-  private static readonly FALLBACK_PANEL_WIDTH = 420;
-  private static readonly FALLBACK_PANEL_HEIGHT = 460;
-
   private readonly sessions = new Map<HTMLElement, HistorySession>();
   private activeSession: HistorySession | null = null;
   private selectedSnapshotId: string | null = null;
   private isPanelOpen = false;
-  private observedElement: HTMLElement | null = null;
-  private positionFrame: number | null = null;
 
   private readonly root = document.createElement('div');
   private readonly button = document.createElement('button');
@@ -139,9 +130,6 @@ class VersionHistoryManager {
   private readonly previewDiff = document.createElement('div');
   private readonly restoreButton = document.createElement('button');
   private readonly emptyState = document.createElement('div');
-  private readonly resizeObserver = typeof ResizeObserver === 'function'
-    ? new ResizeObserver(() => this.schedulePositionUpdate())
-    : null;
 
   init() {
     this.buildUi();
@@ -149,10 +137,8 @@ class VersionHistoryManager {
     this.observeDom();
 
     document.addEventListener('focusin', this.handleFocusIn, true);
-    document.addEventListener('scroll', this.handleViewportChange, true);
     document.addEventListener('keydown', this.handleKeyDown, true);
     document.addEventListener('visibilitychange', this.handleVisibilityChange, true);
-    window.addEventListener('resize', this.handleViewportChange, true);
     window.addEventListener('pagehide', this.handlePageHide, true);
 
     const active = findHistoryEditable(document.activeElement);
@@ -292,7 +278,6 @@ class VersionHistoryManager {
     if (!session) return;
 
     this.activeSession = session;
-    this.observeActiveElement(element);
     void session.ensureLoaded().then(() => {
       if (this.activeSession !== session) return;
       this.ensureSelectedSnapshot();
@@ -318,7 +303,6 @@ class VersionHistoryManager {
   private closePanel() {
     this.isPanelOpen = false;
     this.panel.hidden = true;
-    this.schedulePositionUpdate();
   }
 
   private ensureSelectedSnapshot(force = false) {
@@ -347,20 +331,15 @@ class VersionHistoryManager {
     const session = this.activeSession;
     const hasActiveElement = session?.target.element.isConnected ?? false;
 
-    this.root.hidden = !hasActiveElement;
     this.button.hidden = !hasActiveElement;
     if (!hasActiveElement || !session) return;
 
     const versions = session.record?.snapshots ?? [];
     const latest = versions.at(-1);
 
-    this.buttonTitle.textContent = 'Autosaved draft';
     this.buttonMeta.textContent = latest
-      ? `${session.target.label} · ${versions.length} version${versions.length === 1 ? '' : 's'} · ${formatRelativeTime(latest.savedAt)}`
-      : `${session.target.label} · No local versions yet`;
-
-    this.button.setAttribute('aria-label', `Version history for ${session.target.label}`);
-    this.schedulePositionUpdate();
+      ? `${versions.length} version${versions.length === 1 ? '' : 's'} · ${formatRelativeTime(latest.savedAt)}`
+      : 'No local versions yet';
   }
 
   private renderPanel() {
@@ -375,7 +354,7 @@ class VersionHistoryManager {
     const selected = snapshots.find((snapshot) => snapshot.id === this.selectedSnapshotId) ?? null;
 
     this.headerTitle.textContent = session.target.label;
-    this.headerMeta.textContent = 'Restore replaces the full contents of this editor.';
+    this.headerMeta.textContent = session.target.descriptor;
     this.emptyState.hidden = snapshots.length > 0;
     this.versionsList.innerHTML = '';
 
@@ -401,7 +380,6 @@ class VersionHistoryManager {
       this.previewSummary.textContent = 'Pick a saved version to preview the full restore diff.';
       this.previewDiff.innerHTML = '';
       this.restoreButton.disabled = true;
-      this.schedulePositionUpdate();
       return;
     }
 
@@ -415,7 +393,6 @@ class VersionHistoryManager {
 
     this.previewDiff.innerHTML = renderDiffHtml(diff.chunks);
     this.restoreButton.disabled = unchanged;
-    this.schedulePositionUpdate();
   }
 
   private async captureManualSnapshot() {
@@ -442,99 +419,6 @@ class VersionHistoryManager {
     await session.persist('restore', true);
     this.ensureSelectedSnapshot(true);
     this.renderPanel();
-  }
-
-  private observeActiveElement(element: HTMLElement | null) {
-    if (this.observedElement === element) return;
-
-    if (this.resizeObserver && this.observedElement) {
-      this.resizeObserver.unobserve(this.observedElement);
-    }
-
-    this.observedElement = element;
-
-    if (this.resizeObserver && element) {
-      this.resizeObserver.observe(element);
-    }
-  }
-
-  private schedulePositionUpdate() {
-    if (this.positionFrame !== null) return;
-
-    this.positionFrame = window.requestAnimationFrame(() => {
-      this.positionFrame = null;
-      this.positionUi();
-    });
-  }
-
-  private positionUi() {
-    const session = this.activeSession;
-    const element = session?.target.element;
-    if (!element?.isConnected || this.button.hidden) return;
-
-    const rect = element.getBoundingClientRect();
-    const viewportWidth = window.innerWidth;
-    const viewportHeight = window.innerHeight;
-    const edge = VersionHistoryManager.EDGE_MARGIN;
-    const gap = VersionHistoryManager.GAP;
-
-    if (
-      rect.width <= 0 ||
-      rect.height <= 0 ||
-      rect.bottom < edge ||
-      rect.top > viewportHeight - edge ||
-      rect.right < edge ||
-      rect.left > viewportWidth - edge
-    ) {
-      this.root.hidden = true;
-      return;
-    }
-
-    this.root.hidden = false;
-
-    const buttonWidth = Math.min(
-      this.button.offsetWidth || VersionHistoryManager.FALLBACK_BUTTON_WIDTH,
-      Math.max(160, viewportWidth - edge * 2),
-    );
-    const buttonHeight = this.button.offsetHeight || VersionHistoryManager.FALLBACK_BUTTON_HEIGHT;
-    const buttonLeft = clamp(
-      rect.right - buttonWidth,
-      edge,
-      Math.max(edge, viewportWidth - buttonWidth - edge),
-    );
-    const buttonTop = placeNearRect(rect, buttonHeight, viewportHeight, edge, gap);
-
-    this.button.style.left = `${buttonLeft}px`;
-    this.button.style.top = `${buttonTop}px`;
-
-    if (!this.isPanelOpen || this.panel.hidden) return;
-
-    const panelWidth = Math.min(
-      this.panel.offsetWidth || VersionHistoryManager.FALLBACK_PANEL_WIDTH,
-      Math.max(260, viewportWidth - edge * 2),
-    );
-    const panelHeight = Math.min(
-      this.panel.offsetHeight || VersionHistoryManager.FALLBACK_PANEL_HEIGHT,
-      Math.max(220, viewportHeight - edge * 2),
-    );
-    const panelLeft = clamp(
-      rect.right - panelWidth,
-      edge,
-      Math.max(edge, viewportWidth - panelWidth - edge),
-    );
-
-    let panelTop = buttonTop + buttonHeight + gap;
-    if (panelTop + panelHeight > viewportHeight - edge) {
-      const aboveButtonTop = buttonTop - panelHeight - gap;
-      if (aboveButtonTop >= edge) {
-        panelTop = aboveButtonTop;
-      } else {
-        panelTop = clamp(rect.top + gap, edge, Math.max(edge, viewportHeight - panelHeight - edge));
-      }
-    }
-
-    this.panel.style.left = `${panelLeft}px`;
-    this.panel.style.top = `${panelTop}px`;
   }
 
   private observeDom() {
@@ -568,7 +452,6 @@ class VersionHistoryManager {
         if (this.activeSession === session) {
           this.activeSession = null;
           this.selectedSnapshotId = null;
-          this.observeActiveElement(null);
           this.closePanel();
           this.renderButton();
         }
@@ -584,7 +467,6 @@ class VersionHistoryManager {
       if (this.activeSession === session) {
         this.activeSession = null;
         this.selectedSnapshotId = null;
-        this.observeActiveElement(null);
       }
     }
 
@@ -608,10 +490,6 @@ class VersionHistoryManager {
     void this.flushAllSessions();
   };
 
-  private readonly handleViewportChange = () => {
-    this.schedulePositionUpdate();
-  };
-
   private readonly handlePageHide = () => {
     void this.flushAllSessions();
   };
@@ -619,26 +497,6 @@ class VersionHistoryManager {
   private async flushAllSessions() {
     await Promise.all([...this.sessions.values()].map((session) => session.flushPending()));
   }
-}
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(Math.max(value, min), max);
-}
-
-function placeNearRect(
-  rect: DOMRect,
-  overlayHeight: number,
-  viewportHeight: number,
-  edge: number,
-  gap: number,
-): number {
-  const preferredAbove = rect.top - overlayHeight - gap;
-  if (preferredAbove >= edge) return preferredAbove;
-
-  const preferredBelow = rect.bottom + gap;
-  if (preferredBelow + overlayHeight <= viewportHeight - edge) return preferredBelow;
-
-  return clamp(preferredBelow, edge, Math.max(edge, viewportHeight - overlayHeight - edge));
 }
 
 function renderDiffHtml(chunks: ReturnType<typeof diffText>['chunks']): string {

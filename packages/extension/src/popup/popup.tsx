@@ -385,7 +385,7 @@ function Popup() {
       </div>
 
       <div style={styles.helper}>
-        Use the chip beside the focused editor, or this popup, to review issues and local version history.
+        Review issues and local version history here.
       </div>
 
       <div style={styles.section}>
