@@ -20,6 +20,8 @@ let activeMark: HTMLElement | null = null;
 
 interface AnnotationManagerOptions {
   onApplyIssue?: (issue: Issue) => void;
+  onIgnoreIssue?: (issue: Issue) => void;
+  onIgnoreIssueFamily?: (fingerprint: string, issue: Issue) => void;
 }
 
 export type AnnotationRenderMode = 'inline' | 'overlay';
@@ -174,6 +176,8 @@ export class AnnotationManager {
   private overlayMarks: HTMLElement[] = [];
   private overlayRoot: HTMLElement | null = null;
   private onApplyIssue?: (issue: Issue) => void;
+  private onIgnoreIssue?: (issue: Issue) => void;
+  private onIgnoreIssueFamily?: (fingerprint: string, issue: Issue) => void;
   private lastIssues: Issue[] = [];
   private lastMode: AnnotationRenderMode = 'inline';
   private dismissedIssueKeys = new Set<string>();
@@ -199,6 +203,8 @@ export class AnnotationManager {
   constructor(element: HTMLElement, options: AnnotationManagerOptions = {}) {
     this.element = element;
     this.onApplyIssue = options.onApplyIssue;
+    this.onIgnoreIssue = options.onIgnoreIssue;
+    this.onIgnoreIssueFamily = options.onIgnoreIssueFamily;
   }
 
   destroy(): void {
@@ -212,6 +218,12 @@ export class AnnotationManager {
 
   getRenderedMarkCount(): number {
     return this.inlineMarks.length + this.overlayMarks.length;
+  }
+
+  setIssues(issues: Issue[]): void {
+    this.lastIssues = [...issues];
+    this.dismissedIssueKeys.clear();
+    this.dismissedFingerprints.clear();
   }
 
   /**
@@ -451,10 +463,8 @@ export class AnnotationManager {
   }
 
   annotate(issues: Issue[], mode: AnnotationRenderMode = 'inline'): void {
-    this.lastIssues = [...issues];
+    this.setIssues(issues);
     this.lastMode = mode;
-    this.dismissedIssueKeys.clear();
-    this.dismissedFingerprints.clear();
 
     if (mode === 'overlay') {
       this.renderOverlayAnnotations(issues, true);
@@ -551,26 +561,27 @@ export class AnnotationManager {
                 this.dismissIssue(issue);
                 if (issue.issueId) {
                   this.removeIssueMarks(issue.issueId);
-                  return;
+                } else {
+                  this.removeMark(mark);
                 }
-
-                this.removeMark(mark);
+                this.onIgnoreIssue?.(issue);
               },
               // onIgnoreAll
               () => {
                 if (issue.fingerprint) {
                   this.dismissIssueFamily(issue.fingerprint);
                   this.removeFingerprintMarks(issue.fingerprint);
+                  this.onIgnoreIssueFamily?.(issue.fingerprint, issue);
                   return;
                 }
 
                 this.dismissIssue(issue);
                 if (issue.issueId) {
                   this.removeIssueMarks(issue.issueId);
-                  return;
+                } else {
+                  this.removeMark(mark);
                 }
-
-                this.removeMark(mark);
+                this.onIgnoreIssue?.(issue);
               },
             );
           });
@@ -734,25 +745,26 @@ export class AnnotationManager {
           this.dismissIssue(issue);
           if (issue.issueId) {
             this.removeIssueMarks(issue.issueId);
-            return;
+          } else {
+            this.removeMark(mark);
           }
-
-          this.removeMark(mark);
+          this.onIgnoreIssue?.(issue);
         },
         () => {
           if (issue.fingerprint) {
             this.dismissIssueFamily(issue.fingerprint);
             this.removeFingerprintMarks(issue.fingerprint);
+            this.onIgnoreIssueFamily?.(issue.fingerprint, issue);
             return;
           }
 
           this.dismissIssue(issue);
           if (issue.issueId) {
             this.removeIssueMarks(issue.issueId);
-            return;
+          } else {
+            this.removeMark(mark);
           }
-
-          this.removeMark(mark);
+          this.onIgnoreIssue?.(issue);
         },
       );
     });

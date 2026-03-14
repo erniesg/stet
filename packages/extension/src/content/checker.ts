@@ -43,6 +43,8 @@ import { isHostAllowed } from '../host-access.js';
 
 const managers = new Map<HTMLElement, AnnotationManager>();
 const latestIssues = new Map<HTMLElement, Issue[]>();
+const ignoredIssueKeys = new WeakMap<HTMLElement, Set<string>>();
+const ignoredIssueFingerprints = new WeakMap<HTMLElement, Set<string>>();
 const trackedEditables = new Set<HTMLElement>();
 let config: ResolvedStetConfig | null = null;
 const timers = new Map<HTMLElement, ReturnType<typeof setTimeout>>();
@@ -199,6 +201,75 @@ function getIssues(element: HTMLElement, text = readEditableText(element)): Issu
   return flatIssues;
 }
 
+function getIgnoredIssueKeySet(element: HTMLElement): Set<string> {
+  let keys = ignoredIssueKeys.get(element);
+  if (!keys) {
+    keys = new Set<string>();
+    ignoredIssueKeys.set(element, keys);
+  }
+  return keys;
+}
+
+function getIgnoredIssueFingerprintSet(element: HTMLElement): Set<string> {
+  let fingerprints = ignoredIssueFingerprints.get(element);
+  if (!fingerprints) {
+    fingerprints = new Set<string>();
+    ignoredIssueFingerprints.set(element, fingerprints);
+  }
+  return fingerprints;
+}
+
+function filterIgnoredIssues(element: HTMLElement, issues: Issue[]): Issue[] {
+  const ignoredKeys = ignoredIssueKeys.get(element);
+  const ignoredFingerprints = ignoredIssueFingerprints.get(element);
+  if ((!ignoredKeys || ignoredKeys.size === 0) && (!ignoredFingerprints || ignoredFingerprints.size === 0)) {
+    return issues;
+  }
+
+  return issues.filter((issue) => {
+    if (ignoredKeys?.has(getIssueSelectionKey(issue))) return false;
+    if (issue.fingerprint && ignoredFingerprints?.has(issue.fingerprint)) return false;
+    return true;
+  });
+}
+
+function rememberElementIssues(element: HTMLElement, issues: Issue[]) {
+  latestIssues.set(element, issues);
+  getOrCreateManager(element)?.setIssues(issues);
+  getIssuePanel().updateIssues(element, issues);
+}
+
+function publishElementIssues(element: HTMLElement, issues: Issue[]) {
+  rememberElementIssues(element, issues);
+  syncPageState();
+}
+
+function dismissIssueFromConnectedUi(element: HTMLElement, issue: Issue) {
+  recentInputAt.set(element, getNow());
+  getIgnoredIssueKeySet(element).add(getIssueSelectionKey(issue));
+  if (issue.fingerprint) {
+    getIgnoredIssueFingerprintSet(element).add(issue.fingerprint);
+  }
+
+  publishElementIssues(element, filterIgnoredIssues(element, latestIssues.get(element) ?? []));
+}
+
+function dismissIssueFamilyFromConnectedUi(element: HTMLElement, fingerprint: string) {
+  recentInputAt.set(element, getNow());
+  getIgnoredIssueFingerprintSet(element).add(fingerprint);
+  publishElementIssues(element, filterIgnoredIssues(element, latestIssues.get(element) ?? []));
+}
+
+function clearVisibleIssuesForPendingEdit(element: HTMLElement) {
+  const mgr = managers.get(element);
+  const issues = latestIssues.get(element) ?? [];
+  if (issues.length === 0 && (mgr?.getRenderedMarkCount() ?? 0) === 0) return;
+
+  mgr?.setIssues([]);
+  mgr?.clear();
+  publishElementIssues(element, []);
+}
+
 function runCheckAndAnnotate(element: HTMLElement) {
   if (selfMutating) return;
 
@@ -216,8 +287,8 @@ function runCheckAndAnnotate(element: HTMLElement) {
 
   console.log(`[stet] Checking <${element.tagName.toLowerCase()}> (${text.length} chars)`);
 
-  const issues = getIssues(element, text);
-  latestIssues.set(element, issues);
+  const issues = filterIgnoredIssues(element, getIssues(element, text));
+  rememberElementIssues(element, issues);
 
   logHistoryEvent('checker:post-check', {
     ...getCheckerElementLogData(element),
@@ -262,7 +333,6 @@ function runCheckAndAnnotate(element: HTMLElement) {
     requestAnimationFrame(() => { selfMutating = false; });
   }
 
-  getIssuePanel().updateIssues(element, issues);
   logHistoryEvent('checker:run', {
     ...getCheckerElementLogData(element),
     textLength: text.length,
@@ -284,7 +354,27 @@ function scheduleCheck(element: HTMLElement) {
     ...getCheckerElementLogData(element),
     delay,
   });
-  timers.set(element, setTimeout(() => runCheckAndAnnotate(element), delay));
+  const timer = setTimeout(() => {
+    if (timers.get(element) === timer) {
+      timers.delete(element);
+    }
+    runCheckAndAnnotate(element);
+  }, delay);
+  timers.set(element, timer);
+}
+
+function scheduleInitialCheck(element: HTMLElement, delay = 300) {
+  const existing = timers.get(element);
+  if (existing) clearTimeout(existing);
+
+  const timer = setTimeout(() => {
+    if (timers.get(element) === timer) {
+      timers.delete(element);
+    }
+    runCheckAndAnnotate(element);
+  }, delay);
+
+  timers.set(element, timer);
 }
 
 function pruneDisconnectedElements() {
@@ -817,6 +907,7 @@ function attachListener(el: HTMLElement) {
   el.addEventListener('input', () => {
     if (selfMutating) return;
     recentInputAt.set(el, getNow());
+    clearVisibleIssuesForPendingEdit(el);
     recordHistoryEventRate('checker:input', getCheckerElementLogData(el));
     scheduleCheck(el);
   });
@@ -827,13 +918,19 @@ function attachListener(el: HTMLElement) {
     syncPageState();
   });
 
-  setTimeout(() => runCheckAndAnnotate(el), 300);
+  scheduleInitialCheck(el);
 }
 
 function createAnnotationManager(element: HTMLElement): AnnotationManager {
   return new AnnotationManager(element, {
     onApplyIssue: (issue) => {
       void applySelectedFixes(element, [getIssueSelectionKey(issue)]);
+    },
+    onIgnoreIssue: (issue) => {
+      dismissIssueFromConnectedUi(element, issue);
+    },
+    onIgnoreIssueFamily: (fingerprint) => {
+      dismissIssueFamilyFromConnectedUi(element, fingerprint);
     },
   });
 }
