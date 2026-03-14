@@ -46,6 +46,12 @@ const EMPTY_ISSUES_STATE: PopupIssuesState = {
   issues: [],
 };
 
+function formatSuggestion(issue: PopupIssue): string {
+  if (typeof issue.suggestion !== 'string') return issue.originalText;
+  const replacement = issue.suggestion.length > 0 ? issue.suggestion : 'remove';
+  return `${issue.originalText} -> ${replacement}`;
+}
+
 function Popup() {
   const [enabled, setEnabled] = useState(true);
   const [packs, setPacks] = useState<string[]>([]);
@@ -292,7 +298,7 @@ function Popup() {
                 <div style={styles.issueContent}>
                   <div style={styles.issueRule}>{issue.rule}</div>
                   <div style={styles.issueText}>
-                    {issue.suggestion ? `${issue.originalText} -> ${issue.suggestion}` : issue.originalText}
+                    {formatSuggestion(issue)}
                   </div>
                   <div style={styles.issueDescription}>{issue.description}</div>
                 </div>

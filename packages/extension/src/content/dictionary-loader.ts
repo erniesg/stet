@@ -41,21 +41,31 @@ interface CachedDictionary {
 export async function loadDictionary(
   url: string = getBundledDictionaryUrl() ?? DEFAULT_DICTIONARY_URL,
 ): Promise<string[]> {
-  // 1. Try cache
+  const bundledUrl = getBundledDictionaryUrl();
+  const useBundledAsset = bundledUrl !== null && isSameDictionaryUrl(url, bundledUrl);
+
+  // Always prefer the packaged asset when it exists. It is local to the
+  // extension build, so chrome.storage caching only makes it go stale.
+  if (useBundledAsset) {
+    try {
+      const words = await fetchDictionaryWords(url);
+      console.log(`[stet] Dictionary loaded from extension bundle (${words.length} words)`);
+      return words;
+    } catch (err) {
+      console.warn('[stet] Bundled dictionary fetch failed, falling back to cached/CDN copy:', err);
+    }
+  }
+
+  // 1. Try cache for remote dictionaries / fallback path
   const cached = await getCached();
   if (cached && cached.url === url && (Date.now() - cached.fetchedAt) < CACHE_TTL_MS) {
     console.log(`[stet] Dictionary loaded from cache (${cached.words.length} words)`);
     return cached.words;
   }
 
-  // 2. Fetch from CDN
+  // 2. Fetch remote fallback and cache it
   try {
-    console.log(`[stet] Fetching dictionary from ${url}`);
-    const response = await fetch(url);
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-
-    const text = await response.text();
-    const words = text.split('\n').map(w => w.trim()).filter(Boolean);
+    const words = await fetchDictionaryWords(url);
     console.log(`[stet] Dictionary fetched (${words.length} words)`);
 
     // 3. Cache
@@ -83,6 +93,24 @@ export async function loadCustomTerms(): Promise<string[]> {
       resolve([]);
     }
   });
+}
+
+async function fetchDictionaryWords(url: string): Promise<string[]> {
+  console.log(`[stet] Fetching dictionary from ${url}`);
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+  const text = await response.text();
+  return text.split('\n').map(w => w.trim()).filter(Boolean);
+}
+
+function isSameDictionaryUrl(left: string, right: string): boolean {
+  return stripQuery(left) === stripQuery(right);
+}
+
+function stripQuery(url: string): string {
+  const queryIndex = url.indexOf('?');
+  return queryIndex === -1 ? url : url.slice(0, queryIndex);
 }
 
 /**

@@ -185,6 +185,73 @@ describe('Issue identity', () => {
   });
 });
 
+describe('Issue conflict resolution', () => {
+  beforeAll(() => {
+    registerPack({
+      id: 'test-common-priority',
+      name: 'Test common priority',
+      description: 'Synthetic common-like pack for overlap tests',
+      config: {},
+      rules: [{
+        id: 'TEST-COMMON-CAPS-01',
+        name: 'Capitalize title',
+        category: 'capitalization',
+        severity: 'warning',
+        check: (text) => text.startsWith('mr')
+          ? [{
+              rule: 'TEST-COMMON-CAPS-01',
+              name: 'Capitalize title',
+              category: 'capitalization',
+              severity: 'warning',
+              originalText: 'mr',
+              suggestion: 'Mr',
+              description: 'Capitalize the first word.',
+              offset: 0,
+              length: 2,
+              canFix: true,
+            }]
+          : [],
+      }],
+    });
+
+    registerPack({
+      id: 'test-tenant-priority',
+      name: 'Test tenant priority',
+      description: 'Synthetic tenant pack for overlap tests',
+      config: {},
+      rules: [{
+        id: 'TEST-TENANT-STYLE-01',
+        name: 'Drop courtesy title',
+        category: 'style',
+        severity: 'warning',
+        check: (text) => text.startsWith('mr')
+          ? [{
+              rule: 'TEST-TENANT-STYLE-01',
+              name: 'Drop courtesy title',
+              category: 'style',
+              severity: 'warning',
+              originalText: 'mr',
+              suggestion: '',
+              description: 'Drop courtesy title.',
+              offset: 0,
+              length: 2,
+              canFix: true,
+            }]
+          : [],
+      }],
+    });
+
+  });
+
+  it('prefers later-pack tenant issues over common issues on the same span', () => {
+    const issues = check('mr kwek is here', {
+      packs: ['test-common-priority', 'test-tenant-priority'],
+    });
+
+    expect(issues.map((issue) => issue.rule)).toEqual(['TEST-TENANT-STYLE-01']);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Diagnostics hook
 // ---------------------------------------------------------------------------

@@ -19,7 +19,7 @@ import {
   getEditableTarget,
   replaceEditableText,
 } from './editable-target.js';
-import { resolveIssueRange } from './issue-range.js';
+import { resolveIssueApplyRange } from './issue-range.js';
 
 const managers = new Map<HTMLElement, AnnotationManager>();
 const latestIssues = new Map<HTMLElement, Issue[]>();
@@ -174,11 +174,7 @@ function runCheckAndAnnotate(element: HTMLElement) {
     console.log('[stet] No issues found');
   }
 
-  let mgr = managers.get(element);
-  if (!mgr) {
-    mgr = new AnnotationManager(element);
-    managers.set(element, mgr);
-  }
+  const mgr = getOrCreateManager(element);
 
   selfMutating = true;
   try {
@@ -312,7 +308,7 @@ async function applySelectedFixes(element: HTMLElement, selectedIssueKeys: strin
     .sort((left, right) => right.offset - left.offset);
 
   for (const issue of selected) {
-    const range = resolveIssueRange(text, issue);
+    const range = resolveIssueApplyRange(text, issue);
     if (!range) continue;
     if (range.end > nextLockedStart) continue;
 
@@ -397,7 +393,7 @@ function findEditableForNode(node: Node | null): HTMLElement | null {
 
 function attachListener(el: HTMLElement) {
   if (managers.has(el)) return;
-  managers.set(el, new AnnotationManager(el));
+  managers.set(el, createAnnotationManager(el));
 
   el.addEventListener('input', () => {
     if (selfMutating) return;
@@ -410,6 +406,23 @@ function attachListener(el: HTMLElement) {
   });
 
   setTimeout(() => runCheckAndAnnotate(el), 300);
+}
+
+function createAnnotationManager(element: HTMLElement): AnnotationManager {
+  return new AnnotationManager(element, {
+    onApplyIssue: (issue) => {
+      void applySelectedFixes(element, [getIssueSelectionKey(issue)]);
+    },
+  });
+}
+
+function getOrCreateManager(element: HTMLElement): AnnotationManager {
+  let mgr = managers.get(element);
+  if (!mgr) {
+    mgr = createAnnotationManager(element);
+    managers.set(element, mgr);
+  }
+  return mgr;
 }
 
 function discoverEditables() {

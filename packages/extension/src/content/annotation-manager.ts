@@ -3,7 +3,7 @@
  *
  * - Colored underlines by severity (red=error, orange=warning, blue=info)
  * - Click to open card popup with rule info, suggestion chips, ignore buttons
- * - Suggestion chips apply the fix inline on click
+ * - Suggestion chips apply fixes via the checker replacement pipeline
  * - Ignore / Ignore all dismiss the issue
  */
 
@@ -16,6 +16,19 @@ const TAG = 'stet-mark';
 let activeCard: HTMLElement | null = null;
 /** Currently active mark (the one whose card is open) */
 let activeMark: HTMLElement | null = null;
+
+interface AnnotationManagerOptions {
+  onApplyIssue?: (issue: Issue) => void;
+}
+
+function unwrapMark(mark: Element): void {
+  const parent = mark.parentNode;
+  if (!parent) return;
+
+  const text = document.createTextNode(mark.textContent || '');
+  parent.replaceChild(text, mark);
+  parent.normalize();
+}
 
 /** Close any open card */
 function closeCard() {
@@ -38,7 +51,7 @@ document.addEventListener('click', (e) => {
 });
 
 /** Build and show the card popup for an issue */
-function showCard(mark: HTMLElement, issue: Issue, onApply: (text: string) => void, onIgnore: () => void) {
+function showCard(mark: HTMLElement, issue: Issue, onApply: (issue: Issue) => void, onIgnore: () => void) {
   closeCard();
 
   activeMark = mark;
@@ -70,17 +83,18 @@ function showCard(mark: HTMLElement, issue: Issue, onApply: (text: string) => vo
   card.appendChild(desc);
 
   // Suggestion chips
-  if (issue.suggestion) {
+  if (typeof issue.suggestion === 'string') {
     const suggestions = document.createElement('div');
     suggestions.className = 'stet-suggestions';
+    const suggestionLabel = issue.suggestion.length > 0 ? issue.suggestion : 'remove';
 
     // Show original → suggestion
     const chip = document.createElement('button');
     chip.className = 'stet-suggestion-chip';
-    chip.innerHTML = `<span class="stet-card-original">${issue.originalText}</span><span class="stet-card-arrow">\u2192</span>${issue.suggestion}`;
+    chip.innerHTML = `<span class="stet-card-original">${issue.originalText}</span><span class="stet-card-arrow">\u2192</span>${suggestionLabel}`;
     chip.addEventListener('click', (e) => {
       e.stopPropagation();
-      onApply(issue.suggestion!);
+      onApply(issue);
       closeCard();
     });
     suggestions.appendChild(chip);
@@ -110,12 +124,7 @@ function showCard(mark: HTMLElement, issue: Issue, onApply: (text: string) => vo
     const fp = mark.dataset.fingerprint;
     if (fp) {
       document.querySelectorAll(`${TAG}[data-fingerprint="${fp}"]`).forEach((el) => {
-        const parent = el.parentNode;
-        if (parent) {
-          const text = document.createTextNode(el.textContent || '');
-          parent.replaceChild(text, el);
-          parent.normalize();
-        }
+        unwrapMark(el);
       });
     } else {
       onIgnore();
@@ -144,9 +153,11 @@ function showCard(mark: HTMLElement, issue: Issue, onApply: (text: string) => vo
 export class AnnotationManager {
   private element: HTMLElement;
   private marks: HTMLElement[] = [];
+  private onApplyIssue?: (issue: Issue) => void;
 
-  constructor(element: HTMLElement) {
+  constructor(element: HTMLElement, options: AnnotationManagerOptions = {}) {
     this.element = element;
+    this.onApplyIssue = options.onApplyIssue;
   }
 
   /**
@@ -288,14 +299,17 @@ export class AnnotationManager {
   clear(): void {
     closeCard();
     for (const mark of this.marks) {
-      const parent = mark.parentNode;
-      if (parent) {
-        const text = document.createTextNode(mark.textContent || '');
-        parent.replaceChild(text, mark);
-        parent.normalize();
-      }
+      unwrapMark(mark);
     }
     this.marks = [];
+  }
+
+  private removeIssueMarks(issueId: string): void {
+    this.marks = this.marks.filter((mark) => {
+      if (mark.dataset.issueId !== issueId) return true;
+      unwrapMark(mark);
+      return false;
+    });
   }
 
   annotate(issues: Issue[]): void {
@@ -341,6 +355,7 @@ export class AnnotationManager {
           const mark = document.createElement(TAG);
           mark.dataset.rule = issue.rule;
           mark.dataset.severity = issue.severity;
+          if (issue.issueId) mark.dataset.issueId = issue.issueId;
           if (issue.fingerprint) mark.dataset.fingerprint = issue.fingerprint;
 
           // Click to show card
@@ -350,22 +365,22 @@ export class AnnotationManager {
 
             showCard(mark, issue,
               // onApply
-              (replacement) => {
-                const parent = mark.parentNode;
-                if (parent) {
-                  const text = document.createTextNode(replacement);
-                  parent.replaceChild(text, mark);
-                  parent.normalize();
+              (selectedIssue) => {
+                if (this.onApplyIssue) {
+                  this.onApplyIssue(selectedIssue);
+                  return;
                 }
+
+                unwrapMark(mark);
               },
               // onIgnore
               () => {
-                const parent = mark.parentNode;
-                if (parent) {
-                  const text = document.createTextNode(mark.textContent || '');
-                  parent.replaceChild(text, mark);
-                  parent.normalize();
+                if (issue.issueId) {
+                  this.removeIssueMarks(issue.issueId);
+                  return;
                 }
+
+                unwrapMark(mark);
               },
             );
           });

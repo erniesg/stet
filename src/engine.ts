@@ -161,6 +161,82 @@ function deduplicateIssues(issues: Issue[]): Issue[] {
   });
 }
 
+const SEVERITY_PRIORITY: Record<Issue['severity'], number> = {
+  error: 2,
+  warning: 1,
+  info: 0,
+};
+
+function getIssueSpan(issue: Issue): { start: number; end: number; length: number } {
+  const length = Math.max(0, issue.length || issue.originalText?.length || 0);
+  return {
+    start: issue.offset,
+    end: issue.offset + length,
+    length,
+  };
+}
+
+function issuesConflict(
+  left: Issue,
+  right: Issue,
+  getPackPrecedence: (ruleId: string) => number,
+): boolean {
+  const leftSpan = getIssueSpan(left);
+  const rightSpan = getIssueSpan(right);
+
+  if (leftSpan.length === 0 || rightSpan.length === 0) return false;
+  if (getPackPrecedence(left.rule) === getPackPrecedence(right.rule)) return false;
+
+  const overlaps = leftSpan.start < rightSpan.end && rightSpan.start < leftSpan.end;
+  if (!overlaps) return false;
+
+  return leftSpan.start === rightSpan.start || leftSpan.end === rightSpan.end;
+}
+
+function resolveIssueConflicts(issues: Issue[], activePackIds: string[]): Issue[] {
+  const packPrecedence = new Map<string, number>();
+  const getPackPrecedence = (ruleId: string): number => {
+    if (!packPrecedence.has(ruleId)) {
+      const packId = findPackForRule(ruleId);
+      packPrecedence.set(ruleId, packId ? activePackIds.indexOf(packId) : -1);
+    }
+    return packPrecedence.get(ruleId) ?? -1;
+  };
+
+  const prioritized = [...issues].sort((left, right) => {
+    const packDelta = getPackPrecedence(right.rule) - getPackPrecedence(left.rule);
+    if (packDelta !== 0) return packDelta;
+
+    const severityDelta = SEVERITY_PRIORITY[right.severity] - SEVERITY_PRIORITY[left.severity];
+    if (severityDelta !== 0) return severityDelta;
+
+    const leftSpan = getIssueSpan(left);
+    const rightSpan = getIssueSpan(right);
+    const lengthDelta = leftSpan.length - rightSpan.length;
+    if (lengthDelta !== 0) return lengthDelta;
+
+    const fixDelta = Number(right.canFix) - Number(left.canFix);
+    if (fixDelta !== 0) return fixDelta;
+
+    const suggestionDelta =
+      Number(typeof right.suggestion === 'string') - Number(typeof left.suggestion === 'string');
+    if (suggestionDelta !== 0) return suggestionDelta;
+
+    const offsetDelta = left.offset - right.offset;
+    if (offsetDelta !== 0) return offsetDelta;
+
+    return left.rule.localeCompare(right.rule);
+  });
+
+  const selected: Issue[] = [];
+  for (const issue of prioritized) {
+    if (selected.some((existing) => issuesConflict(issue, existing, getPackPrecedence))) continue;
+    selected.push(issue);
+  }
+
+  return selected;
+}
+
 /**
  * Main entry point: check text against active rule packs.
  * Returns issues sorted by offset.
@@ -227,8 +303,9 @@ export function check(text: string, options?: CheckOptions): Issue[] {
   // Stamp identity on all issues
   issues = issues.map(stampIdentity);
 
-  // Deduplicate and sort by offset
+  // Deduplicate, resolve overlapping conflicts, and sort by offset
   issues = deduplicateIssues(issues);
+  issues = resolveIssueConflicts(issues, activePackIds);
   issues.sort((a, b) => a.offset - b.offset);
 
   return issues;
@@ -286,6 +363,7 @@ export async function checkAsync(text: string, options?: CheckOptions): Promise<
 
   let allIssues = [...syncIssues, ...asyncResults.flat().map(stampIdentity)];
   allIssues = deduplicateIssues(allIssues);
+  allIssues = resolveIssueConflicts(allIssues, activePackIds);
   allIssues.sort((a, b) => a.offset - b.offset);
 
   return allIssues;

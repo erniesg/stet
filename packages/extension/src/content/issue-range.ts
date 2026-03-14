@@ -31,6 +31,53 @@ export function resolveIssueRange(text: string, issue: Issue, searchWindow = 24)
   return null;
 }
 
+export function resolveIssueApplyRange(text: string, issue: Issue, searchWindow = 24): IssueRange | null {
+  const applyEndOffset = getIssueMetaNumber(issue, 'applyEndOffset');
+  const applyLength = getIssueMetaNumber(issue, 'applyLength');
+  const resolvedApplyLength = applyEndOffset !== null
+    ? applyEndOffset - issue.offset
+    : applyLength;
+
+  if (resolvedApplyLength === null || resolvedApplyLength <= 0) {
+    return resolveIssueRange(text, issue, searchWindow);
+  }
+
+  if (issue.originalText) {
+    const directMatch = text.slice(issue.offset, issue.offset + issue.originalText.length);
+    if (directMatch === issue.originalText) {
+      return {
+        start: issue.offset,
+        end: Math.min(text.length, issue.offset + resolvedApplyLength),
+      };
+    }
+
+    const nearest = findNearestExactMatch(text, issue.originalText, issue.offset, searchWindow);
+    if (nearest !== null) {
+      return {
+        start: nearest,
+        end: Math.min(text.length, nearest + resolvedApplyLength),
+      };
+    }
+  }
+
+  const annotationRange = resolveIssueRange(text, issue, searchWindow);
+  if (annotationRange) {
+    return {
+      start: annotationRange.start,
+      end: Math.min(text.length, annotationRange.start + resolvedApplyLength),
+    };
+  }
+
+  if (issue.offset >= 0 && issue.offset < text.length) {
+    return {
+      start: issue.offset,
+      end: Math.min(text.length, issue.offset + resolvedApplyLength),
+    };
+  }
+
+  return null;
+}
+
 function findNearestExactMatch(
   text: string,
   query: string,
@@ -60,4 +107,9 @@ function findNearestExactMatch(
   }
 
   return bestIndex;
+}
+
+function getIssueMetaNumber(issue: Issue, key: string): number | null {
+  const value = issue.meta?.[key];
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
