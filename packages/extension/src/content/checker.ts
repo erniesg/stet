@@ -15,8 +15,6 @@ import { AnnotationManager } from './annotation-manager.js';
 import { loadDictionary, loadCustomTerms } from './dictionary-loader.js';
 import {
   discoverHistoryEditables,
-  discoverAnnotatableEditables,
-  findAnnotatableEditable,
   findHistoryEditable,
   getAnnotationSupport,
   getEditableTarget,
@@ -25,6 +23,7 @@ import {
   replaceEditableRange,
   replaceEditableText,
 } from './editable-target.js';
+import { IssuePanelManager } from './issue-panel.js';
 import { resolveIssueApplyRange } from './issue-range.js';
 import { getReplacementText } from './replacement-text.js';
 import { DEFAULT_HISTORY_POLICY, verifyRestoredContent } from './version-history-core.js';
@@ -44,6 +43,7 @@ import { isHostAllowed } from '../host-access.js';
 
 const managers = new Map<HTMLElement, AnnotationManager>();
 const latestIssues = new Map<HTMLElement, Issue[]>();
+const trackedEditables = new Set<HTMLElement>();
 let config: ResolvedStetConfig | null = null;
 const timers = new Map<HTMLElement, ReturnType<typeof setTimeout>>();
 let selfMutating = false;
@@ -57,6 +57,7 @@ let historyTrackingRegistered = false;
 const CHECKER_MARK_SELECTOR = 'stet-mark';
 const INPUT_MUTATION_SUPPRESS_MS = 750;
 const recentInputAt = new WeakMap<HTMLElement, number>();
+let issuePanel: IssuePanelManager | null = null;
 
 interface PopupIssueRecord {
   key: string;
@@ -183,11 +184,10 @@ function getIssues(element: HTMLElement, text = readEditableText(element)): Issu
 
 function runCheckAndAnnotate(element: HTMLElement) {
   if (selfMutating) return;
-  if (!element.isContentEditable) return;
 
   const startedAt = getNow();
   const text = readEditableText(element);
-  const beforeMarks = element.querySelectorAll(CHECKER_MARK_SELECTOR).length;
+  const beforeMarks = element.isContentEditable ? element.querySelectorAll(CHECKER_MARK_SELECTOR).length : 0;
 
   logHistoryEvent('checker:pre-check', {
     ...getCheckerElementLogData(element),
@@ -229,10 +229,10 @@ function runCheckAndAnnotate(element: HTMLElement) {
 
   selfMutating = true;
   try {
-    if (canInlineAnnotate) {
+    if (canInlineAnnotate && mgr) {
       mgr.annotate(issues);
     } else {
-      mgr.clear();
+      mgr?.clear();
       logHistoryEvent('checker:inline-annotations-skip', {
         ...getCheckerElementLogData(element),
         issueCount: issues.length,
@@ -243,12 +243,13 @@ function runCheckAndAnnotate(element: HTMLElement) {
     requestAnimationFrame(() => { selfMutating = false; });
   }
 
+  getIssuePanel().updateIssues(element, issues);
   logHistoryEvent('checker:run', {
     ...getCheckerElementLogData(element),
     textLength: text.length,
     issueCount: issues.length,
     beforeMarks,
-    afterMarks: element.querySelectorAll(CHECKER_MARK_SELECTOR).length,
+    afterMarks: element.isContentEditable ? element.querySelectorAll(CHECKER_MARK_SELECTOR).length : 0,
     elapsedMs: getElapsedMs(startedAt),
   });
   syncPageState();
@@ -267,10 +268,12 @@ function scheduleCheck(element: HTMLElement) {
 }
 
 function pruneDisconnectedElements() {
-  for (const [element] of managers) {
+  for (const element of trackedEditables) {
     if (element.isConnected) continue;
     managers.delete(element);
+    trackedEditables.delete(element);
     latestIssues.delete(element);
+    getIssuePanel().removeElement(element);
     const timer = timers.get(element);
     if (timer) clearTimeout(timer);
     timers.delete(element);
@@ -297,6 +300,8 @@ function getPageIssueCount(): number {
 }
 
 function syncPageState() {
+  getIssuePanel().setActiveElement(getPreferredPopupElement());
+
   try {
     chrome.runtime.sendMessage({
       type: 'SYNC_PAGE_ISSUES',
@@ -309,11 +314,37 @@ function getEditorCount(): number {
   pruneDisconnectedElements();
 
   let total = 0;
-  for (const [element] of managers) {
-    if (!element.isConnected) continue;
-    total += 1;
+  for (const element of trackedEditables) {
+    if (element.isConnected) total += 1;
   }
   return total;
+}
+
+function getIssuePanel(): IssuePanelManager {
+  if (!issuePanel) {
+    issuePanel = new IssuePanelManager(applySelectedFixes);
+  }
+
+  return issuePanel;
+}
+
+function getTrackedEditable(start: EventTarget | null): HTMLElement | null {
+  const editable = findHistoryEditable(start);
+  if (!editable?.isConnected) return null;
+  if (!trackedEditables.has(editable)) return null;
+  return editable;
+}
+
+function getActiveCheckElement(): HTMLElement | null {
+  const trackedHistoryElement = getTrackedHistoryElement();
+  if (trackedHistoryElement && trackedEditables.has(trackedHistoryElement)) {
+    return trackedHistoryElement;
+  }
+
+  if (activeElement?.isConnected && trackedEditables.has(activeElement)) {
+    return activeElement;
+  }
+  return null;
 }
 
 function getIssueSelectionKey(issue: Issue): string {
@@ -370,6 +401,23 @@ function getTrackedHistoryElement(): HTMLElement | null {
   return null;
 }
 
+function getPreferredPopupElement(): HTMLElement | null {
+  pruneDisconnectedElements();
+
+  const activeCheckElement = getActiveCheckElement();
+  if (activeCheckElement) return activeCheckElement;
+
+  for (const [element, issues] of latestIssues) {
+    if (element.isConnected && issues.length > 0) return element;
+  }
+
+  for (const element of trackedEditables) {
+    if (element.isConnected) return element;
+  }
+
+  return null;
+}
+
 function serializeIssue(issue: Issue): PopupIssueRecord {
   return {
     key: getIssueSelectionKey(issue),
@@ -380,25 +428,6 @@ function serializeIssue(issue: Issue): PopupIssueRecord {
     description: issue.description,
     canFix: issue.canFix && typeof issue.suggestion === 'string',
   };
-}
-
-function getPreferredPopupElement(): HTMLElement | null {
-  pruneDisconnectedElements();
-
-  const activeHistoryElement = getTrackedHistoryElement();
-  if (activeHistoryElement) return activeHistoryElement;
-
-  if (activeElement?.isConnected) return activeElement;
-
-  for (const [element, issues] of latestIssues) {
-    if (element.isConnected && issues.length > 0) return element;
-  }
-
-  for (const [element] of managers) {
-    if (element.isConnected) return element;
-  }
-
-  return null;
 }
 
 function getPopupIssuesState(): PopupIssueState {
@@ -600,9 +629,8 @@ function findElementByFieldKey(fieldKey: string): HTMLElement | null {
     return activeHistoryElement;
   }
 
-  for (const [element] of managers) {
-    if (!element.isConnected) continue;
-    if (getEditableTarget(element)?.fieldKey === fieldKey) return element;
+  for (const element of trackedEditables) {
+    if (element.isConnected && getEditableTarget(element)?.fieldKey === fieldKey) return element;
   }
 
   for (const element of discoverHistoryEditables()) {
@@ -684,7 +712,7 @@ function registerRuntimeHandlers() {
 
 function refreshAllChecks() {
   pruneDisconnectedElements();
-  discoverAnnotatableEditables().forEach((element) => {
+  discoverHistoryEditables().forEach((element) => {
     attachListener(element);
     runCheckAndAnnotate(element);
   });
@@ -693,10 +721,10 @@ function refreshAllChecks() {
 function findEditableForNode(node: Node | null): HTMLElement | null {
   if (!node) return null;
   if (node instanceof HTMLElement) {
-    return findAnnotatableEditable(node);
+    return findHistoryEditable(node);
   }
   if (node.parentElement) {
-    return findAnnotatableEditable(node.parentElement);
+    return findHistoryEditable(node.parentElement);
   }
   return null;
 }
@@ -706,8 +734,11 @@ function findEditableForNode(node: Node | null): HTMLElement | null {
 // ---------------------------------------------------------------------------
 
 function attachListener(el: HTMLElement) {
-  if (managers.has(el)) return;
-  managers.set(el, createAnnotationManager(el));
+  if (trackedEditables.has(el)) return;
+  trackedEditables.add(el);
+  if (el.isContentEditable) {
+    managers.set(el, createAnnotationManager(el));
+  }
   logHistoryEvent('checker:attach', getCheckerElementLogData(el));
 
   el.addEventListener('input', () => {
@@ -734,7 +765,9 @@ function createAnnotationManager(element: HTMLElement): AnnotationManager {
   });
 }
 
-function getOrCreateManager(element: HTMLElement): AnnotationManager {
+function getOrCreateManager(element: HTMLElement): AnnotationManager | null {
+  if (!element.isContentEditable) return null;
+
   let mgr = managers.get(element);
   if (!mgr) {
     mgr = createAnnotationManager(element);
@@ -745,7 +778,7 @@ function getOrCreateManager(element: HTMLElement): AnnotationManager {
 
 function discoverEditables() {
   pruneDisconnectedElements();
-  const editables = discoverAnnotatableEditables();
+  const editables = discoverHistoryEditables();
   editables.forEach(attachListener);
   logHistoryEvent('checker:discover', {
     hostname: window.location.hostname,
@@ -760,7 +793,9 @@ function observeDOM() {
   domObserver = new MutationObserver((mutations) => {
     if (selfMutating) return;
 
+    const trackedBeforePrune = trackedEditables.size;
     pruneDisconnectedElements();
+    const prunedTrackedEditables = trackedEditables.size !== trackedBeforePrune;
     const changedEditables = new Set<HTMLElement>();
 
     for (const mutation of mutations) {
@@ -772,9 +807,9 @@ function observeDOM() {
         if (changedEditable) changedEditables.add(changedEditable);
 
         if (node instanceof HTMLElement) {
-          const editable = findAnnotatableEditable(node);
+          const editable = findHistoryEditable(node);
           if (editable) attachListener(editable);
-          discoverAnnotatableEditables(node).forEach((discovered) => {
+          discoverHistoryEditables(node).forEach((discovered) => {
             attachListener(discovered);
             changedEditables.add(discovered);
           });
@@ -797,7 +832,9 @@ function observeDOM() {
       mutationCount: mutations.length,
       changedEditableCount: changedEditables.size,
     });
-    syncPageState();
+    if (prunedTrackedEditables || changedEditables.size > 0) {
+      syncPageState();
+    }
   });
   domObserver.observe(document.body ?? document.documentElement, {
     childList: true,
@@ -882,7 +919,7 @@ export async function initChecker(onDictionaryLoaded?: OnDictionaryLoaded) {
   observeDOM();
   registerRuntimeHandlers();
   registerHistoryTracking();
-  activeElement = findAnnotatableEditable(document.activeElement);
+  activeElement = getTrackedEditable(document.activeElement);
   lastHistoryElement = findHistoryEditable(document.activeElement);
   syncPageState();
 
