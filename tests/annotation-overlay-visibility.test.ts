@@ -76,4 +76,41 @@ describe('AnnotationManager overlay visibility', () => {
 
     manager.destroy();
   });
+
+  it('keeps the mark visible when applying a fix fails', async () => {
+    const editor = document.createElement('div');
+    editor.textContent = 'Alpha while beta';
+    document.body.appendChild(editor);
+
+    const manager = new AnnotationManager(editor, {
+      onApplyIssue: async () => false,
+    });
+
+    manager.annotate([
+      {
+        rule: 'BT-DICT-01',
+        severity: 'warning',
+        offset: 6,
+        length: 5,
+        originalText: 'while',
+        suggestion: 'whilst',
+        description: 'Use the CPI house style term.',
+        canFix: true,
+      },
+    ], 'overlay');
+
+    const overlayMark = document.querySelector('.stet-overlay-mark') as HTMLButtonElement | null;
+    expect(overlayMark).not.toBeNull();
+
+    overlayMark?.click();
+    const chip = document.querySelector('.stet-suggestion-chip') as HTMLButtonElement | null;
+    expect(chip).not.toBeNull();
+
+    chip?.click();
+    await Promise.resolve();
+
+    expect(document.querySelectorAll('.stet-overlay-mark')).toHaveLength(1);
+
+    manager.destroy();
+  });
 });

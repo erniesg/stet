@@ -72,12 +72,11 @@ stet-mark:hover {
     linear-gradient(to top, var(--stet-annotation-color), var(--stet-annotation-color)) left bottom / 100% 3px no-repeat,
     linear-gradient(to top, var(--stet-annotation-tint), transparent 70%);
   box-shadow: inset 0 -1px 0 rgba(255, 255, 255, 0.72);
-  transition: transform 0.12s ease, filter 0.12s ease;
+  transition: filter 0.12s ease;
 }
 
 .stet-overlay-mark:hover {
   filter: saturate(1.1);
-  transform: translateY(-1px);
 }
 
 /* Popup card */

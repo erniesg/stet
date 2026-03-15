@@ -437,11 +437,11 @@ function cleanupTrackedEditable(element: HTMLElement) {
 
 function getResolvedEditableElement(element: HTMLElement): HTMLElement | null {
   if (element instanceof HTMLTextAreaElement) {
-    const target = getEditableTarget(element);
-    if (target) return target.element;
-
     const mirror = mirrorTextarea(element);
     if (mirror) return mirror;
+
+    const target = getEditableTarget(element);
+    if (target) return target.element;
   }
 
   return element;
@@ -666,6 +666,7 @@ async function applySelectedFixes(element: HTMLElement, selectedIssueKeys: strin
   let text = readEditableText(element);
   let applied = 0;
   let nextLockedStart = Number.POSITIVE_INFINITY;
+  let googleDocsApplyFailed = false;
 
   const selected = issues
     .filter((issue) => selectedIssueKeys.includes(getIssueSelectionKey(issue)))
@@ -691,7 +692,8 @@ async function applySelectedFixes(element: HTMLElement, selectedIssueKeys: strin
           text,
         );
         if (!replaced) {
-          usedFullReplacement = true;
+          googleDocsApplyFailed = true;
+          break;
         }
       } else if (element.isContentEditable) {
         const replaced = replaceEditableRange(element, range.start, range.end, replacement);
@@ -719,6 +721,8 @@ async function applySelectedFixes(element: HTMLElement, selectedIssueKeys: strin
       notifyEditableChanged(element);
     }
     runCheckAndAnnotate(element);
+  } else if (googleDocsApplyFailed) {
+    runCheckAndAnnotate(element);
   }
 
   logHistoryEvent('checker:apply', {
@@ -726,6 +730,7 @@ async function applySelectedFixes(element: HTMLElement, selectedIssueKeys: strin
     selectedCount: selected.length,
     appliedCount: applied,
     usedFullReplacement,
+    googleDocsApplyFailed,
     resultingIssueCount: (latestIssues.get(element) ?? []).length,
     elapsedMs: getElapsedMs(startedAt),
   }, { level: applied > 0 ? 'debug' : 'warn' });
@@ -1133,7 +1138,8 @@ function attachListener(el: HTMLElement) {
 function createAnnotationManager(element: HTMLElement): AnnotationManager {
   return new AnnotationManager(element, {
     onApplyIssue: (issue) => {
-      void applySelectedFixes(element, [getIssueSelectionKey(issue)]);
+      return applySelectedFixes(element, [getIssueSelectionKey(issue)])
+        .then((applied) => applied > 0);
     },
     onIgnoreIssue: (issue) => {
       dismissIssueFromConnectedUi(element, issue);

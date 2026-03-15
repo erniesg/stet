@@ -9,6 +9,8 @@ const GOOGLE_DOCS_CURSOR_CARET_SELECTOR = '.kix-cursor-caret';
 const GOOGLE_DOCS_SELECTION_SELECTOR = '.kix-selection-overlay';
 const GOOGLE_DOCS_EVENT_TARGET_SELECTOR = 'iframe.docs-texteventtarget-iframe, .docs-texteventtarget-iframe';
 const APPLY_TIMEOUT_MS = 500;
+const UNDO_TIMEOUT_MS = 80;
+const UNDO_ATTEMPTS = 4;
 
 type GoogleDocsInputTarget = Document | HTMLElement;
 
@@ -31,6 +33,7 @@ export async function applyGoogleDocsReplacement(
 ): Promise<boolean> {
   const inputTarget = getGoogleDocsInputTarget(root.ownerDocument);
   if (!inputTarget) return false;
+  const undoBudget = Math.max(UNDO_ATTEMPTS, (end - start) + replacement.length + 2);
 
   let caretOffset = getGoogleDocsCaretOffset(root, sourceText) ?? rememberedCaretOffsets.get(root) ?? null;
   if (caretOffset === null && !hasGoogleDocsSelection(root.ownerDocument)) {
@@ -42,20 +45,29 @@ export async function applyGoogleDocsReplacement(
   if (caretOffset === null) return false;
 
   moveCaretByDelta(inputTarget, start - caretOffset);
+  await waitForFrame();
+
+  const resolvedCaretOffset = getGoogleDocsCaretOffset(root, sourceText);
+  if (resolvedCaretOffset !== start) {
+    await revertUnexpectedGoogleDocsMutation(root, inputTarget, sourceText, undoBudget);
+    return false;
+  }
 
   if (end > start) {
-    extendSelection(inputTarget, end - start);
-    pressSpecialKey(inputTarget, 'Backspace', 8);
+    deleteForwardByCount(inputTarget, end - start);
   }
 
   typeGoogleDocsText(inputTarget, replacement);
 
   const expectedText = `${sourceText.slice(0, start)}${replacement}${sourceText.slice(end)}`;
-  const applied = await waitForExpectedText(root, expectedText);
+  const applied = await waitForExpectedText(root, expectedText, APPLY_TIMEOUT_MS);
   if (applied) {
     rememberedCaretOffsets.set(root, start + replacement.length);
+    return true;
   }
-  return applied;
+
+  await revertUnexpectedGoogleDocsMutation(root, inputTarget, sourceText, undoBudget);
+  return false;
 }
 
 export function replaceGoogleDocsText(root: HTMLElement, text: string): boolean {
@@ -169,9 +181,9 @@ function moveCaretByDelta(target: GoogleDocsInputTarget, delta: number): void {
   }
 }
 
-function extendSelection(target: GoogleDocsInputTarget, length: number): void {
+function deleteForwardByCount(target: GoogleDocsInputTarget, length: number): void {
   for (let index = 0; index < length; index += 1) {
-    pressSpecialKey(target, 'ArrowRight', 39, { shiftKey: true });
+    pressSpecialKey(target, 'Delete', 46);
   }
 }
 
@@ -224,8 +236,35 @@ function pressSpecialKey(
   }));
 }
 
-async function waitForExpectedText(root: HTMLElement, expectedText: string): Promise<boolean> {
-  const deadline = Date.now() + APPLY_TIMEOUT_MS;
+async function revertUnexpectedGoogleDocsMutation(
+  root: HTMLElement,
+  target: GoogleDocsInputTarget,
+  sourceText: string,
+  maxAttempts: number,
+): Promise<boolean> {
+  if (extractGoogleDocsRenderedText(root) === sourceText) return true;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    pressUndoShortcut(target);
+    if (await waitForExpectedText(root, sourceText, UNDO_TIMEOUT_MS)) {
+      return true;
+    }
+  }
+
+  return extractGoogleDocsRenderedText(root) === sourceText;
+}
+
+function pressUndoShortcut(target: GoogleDocsInputTarget): void {
+  const isMac = /\bMac\b/i.test(navigator.platform);
+  pressSpecialKey(target, 'z', 90, isMac ? { metaKey: true } : { ctrlKey: true });
+}
+
+async function waitForExpectedText(
+  root: HTMLElement,
+  expectedText: string,
+  timeoutMs: number,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
 
   while (Date.now() < deadline) {
     if (extractGoogleDocsRenderedText(root) === expectedText) return true;

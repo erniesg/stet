@@ -27,7 +27,7 @@ let activeCard: HTMLElement | null = null;
 let activeMark: HTMLElement | null = null;
 
 interface AnnotationManagerOptions {
-  onApplyIssue?: (issue: Issue) => void;
+  onApplyIssue?: (issue: Issue) => boolean | Promise<boolean>;
   onIgnoreIssue?: (issue: Issue) => void;
   onIgnoreIssueFamily?: (fingerprint: string, issue: Issue) => void;
 }
@@ -264,7 +264,7 @@ export class AnnotationManager {
   private inlineMarks: HTMLElement[] = [];
   private overlayMarks: HTMLElement[] = [];
   private overlayRoot: HTMLElement | null = null;
-  private onApplyIssue?: (issue: Issue) => void;
+  private onApplyIssue?: (issue: Issue) => boolean | Promise<boolean>;
   private onIgnoreIssue?: (issue: Issue) => void;
   private onIgnoreIssueFamily?: (fingerprint: string, issue: Issue) => void;
   private lastIssues: Issue[] = [];
@@ -341,6 +341,19 @@ export class AnnotationManager {
     this.dismissedFingerprints.clear();
   }
 
+  private usesLiteralTextOffsets(): boolean {
+    return this.element.dataset.stetTextareaMirror === 'true'
+      || this.element.getAttribute('contenteditable') === 'plaintext-only';
+  }
+
+  private getInlineAnnotationText(): string {
+    if (this.usesLiteralTextOffsets()) {
+      return this.element.textContent || '';
+    }
+
+    return this.element.innerText || this.element.textContent || '';
+  }
+
   /**
    * Build a text-node-to-innerText-offset map.
    * Uses indexOf on the element's innerText to find each text node's
@@ -348,7 +361,8 @@ export class AnnotationManager {
    * that innerText inserts for <br> and block elements.
    */
   private buildNodeMap(): { node: Text; start: number; end: number }[] {
-    const innerText = this.element.innerText || this.element.textContent || '';
+    const fullText = this.getInlineAnnotationText();
+    const usesLiteralOffsets = this.usesLiteralTextOffsets();
     const entries: { node: Text; start: number; end: number }[] = [];
     const walker = document.createTreeWalker(this.element, NodeFilter.SHOW_TEXT);
 
@@ -361,9 +375,9 @@ export class AnnotationManager {
 
       // Skip whitespace-only nodes between block elements —
       // these don't appear in innerText
-      if (!content.trim() && !content.includes('\u00a0')) continue;
+      if (!usesLiteralOffsets && !content.trim() && !content.includes('\u00a0')) continue;
 
-      const idx = innerText.indexOf(content, searchFrom);
+      const idx = fullText.indexOf(content, searchFrom);
       if (idx >= 0) {
         entries.push({ node, start: idx, end: idx + content.length });
         searchFrom = idx + content.length;
@@ -567,6 +581,18 @@ export class AnnotationManager {
       });
   }
 
+  private async applyIssue(issue: Issue, mark: HTMLElement): Promise<void> {
+    const applied = this.onApplyIssue ? await this.onApplyIssue(issue) : true;
+    if (applied === false) return;
+
+    this.dismissIssue(issue);
+    if (issue.issueId) {
+      this.removeIssueMarks(issue.issueId);
+    } else {
+      this.removeMark(mark);
+    }
+  }
+
   private getVisibleIssues(issues: Issue[]): Issue[] {
     return issues.filter((issue) => {
       if (this.dismissedIssueKeys.has(getIssueKey(issue))) return false;
@@ -608,7 +634,7 @@ export class AnnotationManager {
     }
 
     const sorted = [...issues].sort((a, b) => b.offset - a.offset);
-    const fullText = this.element.innerText || this.element.textContent || '';
+    const fullText = this.getInlineAnnotationText();
 
     // Build text node map aligned to innerText offsets.
     // innerText inserts \n for <br> and \n\n for block elements,
@@ -657,17 +683,7 @@ export class AnnotationManager {
             showCard(mark, issue,
               // onApply
               (selectedIssue) => {
-                this.dismissIssue(selectedIssue);
-                if (issue.issueId) {
-                  this.removeIssueMarks(issue.issueId);
-                } else {
-                  this.removeMark(mark);
-                }
-
-                if (this.onApplyIssue) {
-                  this.onApplyIssue(selectedIssue);
-                  return;
-                }
+                void this.applyIssue(selectedIssue, mark);
               },
               // onIgnore
               () => {
@@ -905,16 +921,7 @@ export class AnnotationManager {
 
       showCard(mark, issue,
         (selectedIssue) => {
-          this.dismissIssue(selectedIssue);
-          if (issue.issueId) {
-            this.removeIssueMarks(issue.issueId);
-          } else {
-            this.removeMark(mark);
-          }
-
-          if (this.onApplyIssue) {
-            this.onApplyIssue(selectedIssue);
-          }
+          void this.applyIssue(selectedIssue, mark);
         },
         () => {
           this.dismissIssue(issue);

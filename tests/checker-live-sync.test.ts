@@ -270,4 +270,31 @@ describe('checker live sync', () => {
     expect(state.activeLabel).toBe('Generated draft');
     expect(state.issues[0]?.rule).toBe('SPELL');
   });
+
+  it('creates a textarea mirror and annotates it inline for textarea-based editors', async () => {
+    createChromeMock();
+    const { initChecker } = await import('../packages/extension/src/content/checker.js');
+
+    document.body.innerHTML = `
+      <label for="cpiArticleInstructions">Additional instructions</label>
+      <textarea id="cpiArticleInstructions" aria-label="Additional instructions"></textarea>
+    `;
+
+    const textarea = document.getElementById('cpiArticleInstructions') as HTMLTextAreaElement;
+    mockRect(textarea, 640, 120);
+
+    await initChecker();
+
+    const mirror = textarea.nextElementSibling as HTMLElement | null;
+    expect(mirror?.dataset.stetTextareaMirror).toBe('true');
+    expect(textarea.style.display).toBe('none');
+
+    mirror!.textContent = 'teh draft';
+    mirror!.dispatchEvent(new FocusEvent('focus', { bubbles: true }));
+    mirror!.dispatchEvent(new Event('input', { bubbles: true }));
+    await waitForChecks();
+
+    expect(textarea.value).toBe('teh draft');
+    expect(mirror?.querySelectorAll('stet-mark')).toHaveLength(1);
+  });
 });
