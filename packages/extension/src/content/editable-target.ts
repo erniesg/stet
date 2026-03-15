@@ -3,6 +3,7 @@ import type {
   EditableHistoryIdentity,
   EditableHistoryIdentitySignals,
 } from './version-history-core.js';
+import { getTextareaForMirror } from './textarea-mirror.js';
 
 export type HistoryEditableKind = 'textarea' | 'contenteditable';
 
@@ -79,23 +80,10 @@ export function getAnnotationSupport(element: HTMLElement): AnnotationSupport {
     };
   }
 
-  if (getHostEditableAdapter(element)) {
-    return {
-      mode: 'overlay',
-      reason: 'host-adapter',
-    };
-  }
-
-  if (hasHostManagedEditorMarker(element)) {
-    return {
-      mode: 'overlay',
-      reason: 'host-managed-editor',
-    };
-  }
-
-  return hasSafeInlineAnnotationMarkup(element)
-    ? { mode: 'inline', reason: 'safe-rich-text-dom' }
-    : { mode: 'overlay', reason: 'safe-overlay-rich-text' };
+  // Always use inline stet-mark annotations for contenteditable elements.
+  // Marks may be destroyed by host editor re-renders (e.g. BTEditor
+  // _renderHighlights) but the checker will recreate them on the next cycle.
+  return { mode: 'inline', reason: 'contenteditable' };
 }
 
 export function supportsInlineAnnotationMarkup(element: HTMLElement): boolean {
@@ -134,6 +122,13 @@ export function discoverHistoryEditables(root: ParentNode = document): HTMLEleme
 export function getEditableTarget(element: HTMLElement): EditableTarget | null {
   if (!(element instanceof HTMLElement)) return null;
 
+  // If the element is a textarea mirror, build identity from the original
+  // textarea (for stable field keys) but read/write through the mirror.
+  const mirroredTextarea = getTextareaForMirror(element);
+  if (mirroredTextarea) {
+    return buildMirrorEditableTarget(element, mirroredTextarea);
+  }
+
   const kind = getEditableKind(element);
   if (!kind) return null;
 
@@ -169,6 +164,60 @@ export function getEditableTarget(element: HTMLElement): EditableTarget | null {
     },
     read: () => readEditableText(element),
     write: (text: string) => getHostEditableAdapter(element)?.write(text) ?? replaceEditableText(element, text),
+  };
+}
+
+function buildMirrorEditableTarget(
+  mirror: HTMLElement,
+  textarea: HTMLTextAreaElement,
+): EditableTarget {
+  // Build identity from the original textarea for stable field keys
+  const descriptor = buildEditableDescriptor(textarea);
+  const label = getEditableLabel(textarea);
+  const url = `${window.location.origin}${window.location.pathname}${window.location.search}`;
+  const identity = deriveEditableIdentity({
+    url,
+    descriptor,
+    label,
+    id: textarea.id || null,
+    name: textarea.getAttribute('name'),
+    ariaLabel: textarea.getAttribute('aria-label'),
+    placeholder: textarea.getAttribute('placeholder'),
+    dataTestId: textarea.getAttribute('data-testid'),
+    role: textarea.getAttribute('role'),
+    containerHint: buildContainerHint(textarea),
+  });
+
+  return {
+    element: mirror,
+    kind: 'textarea', // Keep 'textarea' kind for history label purposes
+    fieldKey: identity.fieldKey,
+    storageKey: `${HISTORY_STORAGE_PREFIX}${identity.fieldKey}`,
+    descriptor,
+    label,
+    url,
+    identity: {
+      descriptorKey: identity.descriptorKey,
+      stableKey: identity.stableKey,
+      source: identity.source,
+      signals: identity.signals,
+    },
+    // Read from the mirror's text content (authoritative while user is typing)
+    read: () => mirror.textContent || '',
+    // Write to both mirror and textarea
+    write: (text: string) => {
+      mirror.textContent = text;
+      const valueSetter = Object.getOwnPropertyDescriptor(
+        HTMLTextAreaElement.prototype,
+        'value',
+      )?.set;
+      if (valueSetter) {
+        valueSetter.call(textarea, text);
+      } else {
+        textarea.value = text;
+      }
+      dispatchEditableEvents(textarea);
+    },
   };
 }
 

@@ -11,7 +11,7 @@
 import { check, checkDocument, toCheckOptions, listPacks } from 'stet';
 import type { ResolvedStetConfig, Issue, DocumentIssue } from 'stet';
 import { extractText } from './text-extractor.js';
-import { AnnotationManager } from './annotation-manager.js';
+import { AnnotationManager, isCardOpen } from './annotation-manager.js';
 import { loadDictionary, loadCustomTerms } from './dictionary-loader.js';
 import {
   discoverHistoryEditables,
@@ -23,9 +23,13 @@ import {
   replaceEditableRange,
   replaceEditableText,
 } from './editable-target.js';
-import { IssuePanelManager } from './issue-panel.js';
+// import { IssuePanelManager } from './issue-panel.js';
 import { resolveIssueApplyRange } from './issue-range.js';
 import { getReplacementText } from './replacement-text.js';
+import {
+  createTextareaMirror,
+  isMirroredTextarea,
+} from './textarea-mirror.js';
 import { DEFAULT_HISTORY_POLICY, verifyRestoredContent } from './version-history-core.js';
 import {
   loadHistoryRecordByFieldKey,
@@ -63,7 +67,7 @@ let historyFeatureEnabled = true;
 const CHECKER_MARK_SELECTOR = 'stet-mark';
 const INPUT_MUTATION_SUPPRESS_MS = 750;
 const recentInputAt = new WeakMap<HTMLElement, number>();
-let issuePanel: IssuePanelManager | null = null;
+// let issuePanel: IssuePanelManager | null = null;
 
 interface PopupIssueRecord {
   key: string;
@@ -110,7 +114,7 @@ const FALLBACK_CONFIG: ResolvedStetConfig = {
   packConfig: { freThreshold: 30, paragraphCharLimit: 320 },
   rules: { enable: [], disable: [] }, dictionaries: [], prompts: {},
   workflows: {}, feedback: { endpoint: null, batchSize: 20, includeContext: false },
-  enabled: true, siteAllowlist: [], debounceMs: 400,
+  enabled: true, siteAllowlist: [], debounceMs: 200,
 };
 
 async function loadConfig(): Promise<ResolvedStetConfig> {
@@ -266,7 +270,7 @@ function filterIgnoredIssues(element: HTMLElement, issues: Issue[]): Issue[] {
 function rememberElementIssues(element: HTMLElement, issues: Issue[]) {
   latestIssues.set(element, issues);
   getOrCreateManager(element)?.setIssues(issues);
-  getIssuePanel().updateIssues(element, issues);
+  // getIssuePanel().updateIssues(element, issues);
 }
 
 function publishElementIssues(element: HTMLElement, issues: Issue[]) {
@@ -298,6 +302,14 @@ function clearVisibleIssuesForPendingEdit(element: HTMLElement) {
 
 function runCheckAndAnnotate(element: HTMLElement) {
   if (selfMutating) return;
+
+  // While a popup card is open, defer annotation rebuild so the card is not
+  // destroyed mid-interaction (Bug 2).  Re-schedule so the check runs once the
+  // card is dismissed.
+  if (isCardOpen()) {
+    scheduleCheck(element);
+    return;
+  }
 
   const startedAt = getNow();
   const text = readEditableText(element);
@@ -410,7 +422,7 @@ function pruneDisconnectedElements() {
     managers.delete(element);
     trackedEditables.delete(element);
     latestIssues.delete(element);
-    getIssuePanel().removeElement(element);
+    // getIssuePanel().removeElement(element);
     const timer = timers.get(element);
     if (timer) clearTimeout(timer);
     timers.delete(element);
@@ -437,7 +449,7 @@ function getPageIssueCount(): number {
 }
 
 function syncPageState() {
-  getIssuePanel().setActiveElement(getPreferredPopupElement());
+  // getIssuePanel().setActiveElement(getPreferredPopupElement());
 
   try {
     chrome.runtime.sendMessage({
@@ -457,13 +469,12 @@ function getEditorCount(): number {
   return total;
 }
 
-function getIssuePanel(): IssuePanelManager {
-  if (!issuePanel) {
-    issuePanel = new IssuePanelManager(applySelectedFixes);
-  }
-
-  return issuePanel;
-}
+// function getIssuePanel(): IssuePanelManager {
+//   if (!issuePanel) {
+//     issuePanel = new IssuePanelManager(applySelectedFixes);
+//   }
+//   return issuePanel;
+// }
 
 function getTrackedEditable(start: EventTarget | null): HTMLElement | null {
   const editable = findHistoryEditable(start);
@@ -932,10 +943,15 @@ function registerRuntimeHandlers() {
 
 function refreshAllChecks() {
   pruneDisconnectedElements();
-  discoverHistoryEditables().forEach((element) => {
-    attachListener(element);
-    runCheckAndAnnotate(element);
-  });
+  for (const element of discoverHistoryEditables()) {
+    let target: HTMLElement = element;
+    if (element instanceof HTMLTextAreaElement) {
+      const mirror = mirrorTextarea(element);
+      if (mirror) target = mirror;
+    }
+    attachListener(target);
+    runCheckAndAnnotate(target);
+  }
 }
 
 function findEditableForNode(node: Node | null): HTMLElement | null {
@@ -956,6 +972,8 @@ function findEditableForNode(node: Node | null): HTMLElement | null {
 function attachListener(el: HTMLElement) {
   if (trackedEditables.has(el)) return;
   trackedEditables.add(el);
+  // Disable browser spellcheck — stet handles it
+  el.spellcheck = false;
   if (el.isContentEditable) {
     managers.set(el, createAnnotationManager(el));
   }
@@ -964,7 +982,6 @@ function attachListener(el: HTMLElement) {
   el.addEventListener('input', () => {
     if (selfMutating) return;
     recentInputAt.set(el, getNow());
-    clearVisibleIssuesForPendingEdit(el);
     recordHistoryEventRate('checker:input', getCheckerElementLogData(el));
     scheduleCheck(el);
   });
@@ -1006,12 +1023,53 @@ function getOrCreateManager(element: HTMLElement): AnnotationManager | null {
 function discoverEditables() {
   pruneDisconnectedElements();
   const editables = discoverHistoryEditables();
-  editables.forEach(attachListener);
+  const resolved: HTMLElement[] = [];
+  for (const el of editables) {
+    if (el instanceof HTMLTextAreaElement) {
+      const mirror = mirrorTextarea(el);
+      if (mirror) {
+        resolved.push(mirror);
+        continue;
+      }
+    }
+    resolved.push(el);
+  }
+  resolved.forEach(attachListener);
   logHistoryEvent('checker:discover', {
     hostname: window.location.hostname,
-    count: editables.length,
+    count: resolved.length,
   });
   syncPageState();
+}
+
+/**
+ * Create a contenteditable mirror for a textarea.
+ * Returns the mirror element, or null if mirroring failed.
+ */
+function mirrorTextarea(textarea: HTMLTextAreaElement): HTMLElement | null {
+  if (isMirroredTextarea(textarea)) {
+    console.log('[stet] textarea already mirrored:', textarea.id || textarea.name || '(anon)');
+    return null;
+  }
+  console.log('[stet] mirroring textarea:', textarea.id || textarea.name || '(anon)',
+    `${textarea.offsetWidth}x${textarea.offsetHeight}`);
+  const mirror = createTextareaMirror(textarea);
+  if (!mirror) {
+    console.warn('[stet] textarea mirror creation failed:', textarea.id || textarea.name || '(anon)');
+    return null;
+  }
+  console.log('[stet] textarea mirror created:', textarea.id || textarea.name || '(anon)');
+  logHistoryEvent('checker:textarea-mirror', {
+    id: textarea.id || null,
+    name: textarea.name || null,
+  });
+  return mirror;
+}
+
+function isStetOwnedNode(node: Node): boolean {
+  const el = node instanceof Element ? node : node.parentElement;
+  if (!el) return false;
+  return !!el.closest('.stet-overlay-root, .stet-history-root, .stet-card');
 }
 
 function observeDOM() {
@@ -1020,23 +1078,37 @@ function observeDOM() {
   domObserver = new MutationObserver((mutations) => {
     if (selfMutating) return;
 
+    // Filter out mutations targeting stet's own DOM to avoid feedback loops
+    const filtered = mutations.filter((m) => !isStetOwnedNode(m.target));
+    if (filtered.length === 0) return;
+
     const trackedBeforePrune = trackedEditables.size;
     pruneDisconnectedElements();
     const prunedTrackedEditables = trackedEditables.size !== trackedBeforePrune;
     const changedEditables = new Set<HTMLElement>();
 
-    for (const mutation of mutations) {
+    for (const mutation of filtered) {
       const mutationEditable = findEditableForNode(mutation.target);
       if (mutationEditable) changedEditables.add(mutationEditable);
 
       for (const node of mutation.addedNodes) {
+        if (isStetOwnedNode(node)) continue;
         const changedEditable = findEditableForNode(node);
         if (changedEditable) changedEditables.add(changedEditable);
 
         if (node instanceof HTMLElement) {
-          const editable = findHistoryEditable(node);
+          let editable = findHistoryEditable(node);
+          if (editable instanceof HTMLTextAreaElement) {
+            const m = mirrorTextarea(editable);
+            if (m) editable = m;
+          }
           if (editable) attachListener(editable);
-          discoverHistoryEditables(node).forEach((discovered) => {
+          discoverHistoryEditables(node).forEach((disc) => {
+            let discovered: HTMLElement = disc;
+            if (disc instanceof HTMLTextAreaElement) {
+              const m = mirrorTextarea(disc);
+              if (m) discovered = m;
+            }
             attachListener(discovered);
             changedEditables.add(discovered);
           });
@@ -1056,7 +1128,7 @@ function observeDOM() {
       scheduleCheck(editable);
     });
     recordHistoryEventRate('checker:mutation-batch', {
-      mutationCount: mutations.length,
+      mutationCount: filtered.length,
       changedEditableCount: changedEditables.size,
     });
     if (prunedTrackedEditables || changedEditables.size > 0) {
@@ -1122,6 +1194,14 @@ export async function initChecker(onDictionaryLoaded?: OnDictionaryLoaded) {
   // Override config packs with whatever is actually registered
   const registered = listPacks().map(p => p.id);
   config = { ...config, packs: registered };
+
+  // If bt-pack is active, disable common spell check (bt-pack's is more complete)
+  if (registered.includes('bt')) {
+    const disabled = config.rules?.disable ?? [];
+    if (!disabled.includes('COMMON-SPELL-01')) {
+      config = { ...config, rules: { ...config.rules, disable: [...disabled, 'COMMON-SPELL-01'] } };
+    }
+  }
 
   // Sync actual packs back to storage so popup reflects reality
   try {

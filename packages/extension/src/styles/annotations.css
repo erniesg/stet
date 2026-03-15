@@ -9,7 +9,7 @@ stet-mark,
 /* Inline underlines by category */
 stet-mark {
   text-decoration-line: underline;
-  text-decoration-style: wavy;
+  text-decoration-style: solid;
   text-decoration-thickness: 2px;
   text-underline-offset: 3px;
   text-decoration-skip-ink: none;
@@ -17,7 +17,8 @@ stet-mark {
   position: relative;
   border-radius: 3px;
   background: linear-gradient(to top, var(--stet-annotation-tint), transparent 60%);
-  transition: background 0.15s, outline-color 0.15s;
+  outline: none;
+  transition: background 0.15s;
 }
 
 /* Category colors (LanguageTool convention) */
@@ -80,7 +81,7 @@ stet-mark:hover {
 /* Popup card */
 .stet-card {
   position: absolute;
-  z-index: 999999;
+  z-index: 2147483647;
   background: #fff;
   border: 1px solid #e2e8f0;
   border-radius: 8px;

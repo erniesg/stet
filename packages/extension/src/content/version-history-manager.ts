@@ -206,6 +206,9 @@ export class VersionHistoryManager {
   private readonly emptyState = document.createElement('div');
   private repositionFrame: number | null = null;
   private pendingPositionSource: string | null = null;
+  private obstacleCache: HistoryLayoutRect[] | null = null;
+  private obstacleCacheTime = 0;
+  private static readonly OBSTACLE_CACHE_TTL_MS = 500;
 
   init() {
     this.runGuarded('init', () => {
@@ -732,11 +735,21 @@ export class VersionHistoryManager {
     this.renderPanel();
   }
 
+  private static isStetOwnedNode(node: Node): boolean {
+    const el = node instanceof Element ? node : node.parentElement;
+    if (!el) return false;
+    return !!el.closest('.stet-overlay-root, .stet-history-root, .stet-card');
+  }
+
   private observeDom() {
     this.observer = new MutationObserver((mutations) => {
       this.runGuarded('mutation-observer', () => {
+        // Filter out mutations targeting stet's own DOM to avoid feedback loops
+        const filtered = mutations.filter((m) => !VersionHistoryManager.isStetOwnedNode(m.target));
+        if (filtered.length === 0) return;
+
         recordHistoryEventRate('mutation', {
-          mutationCount: mutations.length,
+          mutationCount: filtered.length,
         }, this.runtime.debug);
 
         const session = this.activeSession;
@@ -947,6 +960,11 @@ export class VersionHistoryManager {
   }
 
   private collectLayoutObstacles(targetElement: HTMLElement): HistoryLayoutRect[] {
+    const now = performance.now();
+    if (this.obstacleCache && now - this.obstacleCacheTime < VersionHistoryManager.OBSTACLE_CACHE_TTL_MS) {
+      return this.obstacleCache;
+    }
+
     const selector = [
       'button',
       'a[href]',
@@ -959,10 +977,12 @@ export class VersionHistoryManager {
       'summary',
     ].join(', ');
 
-    return [...document.querySelectorAll<HTMLElement>(selector)]
+    const result = [...document.querySelectorAll<HTMLElement>(selector)]
       .filter((element) => {
         if (!element.isConnected) return false;
         if (this.root.contains(element)) return false;
+        // Skip stet's own overlay marks and UI elements
+        if (element.closest('.stet-overlay-root, .stet-history-root, .stet-card')) return false;
         if (element === targetElement) return false;
         if (targetElement.contains(element)) return false;
         if (element.contains(targetElement)) return false;
@@ -984,6 +1004,10 @@ export class VersionHistoryManager {
           height: rect.height,
         };
       });
+
+    this.obstacleCache = result;
+    this.obstacleCacheTime = now;
+    return result;
   }
 
   private logPosition(source: string) {

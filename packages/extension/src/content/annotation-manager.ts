@@ -12,6 +12,7 @@ import { resolveIssueRange } from './issue-range.js';
 import { getElapsedMs, getNow, logHistoryEvent } from './version-history-debug.js';
 
 const TAG = 'stet-mark';
+const MAX_OVERLAY_MARKS = 50;
 
 /** Currently open popup card */
 let activeCard: HTMLElement | null = null;
@@ -42,6 +43,11 @@ function disposeMark(mark: HTMLElement): void {
   }
 
   mark.remove();
+}
+
+/** Returns true when a popup card is currently visible */
+export function isCardOpen(): boolean {
+  return activeCard !== null;
 }
 
 /** Close any open card */
@@ -75,7 +81,7 @@ function showCard(
   closeCard();
 
   activeMark = mark;
-  mark.style.outline = '2px solid rgba(49, 130, 206, 0.4)';
+  // no outline on active mark — card popup is sufficient
 
   const card = document.createElement('div');
   card.className = 'stet-card';
@@ -122,8 +128,8 @@ function showCard(
     chip.append(original, arrow, document.createTextNode(suggestionLabel));
     chip.addEventListener('click', (e) => {
       e.stopPropagation();
-      onApply(issue);
       closeCard();
+      onApply(issue);
     });
     suggestions.appendChild(chip);
     card.appendChild(suggestions);
@@ -138,8 +144,8 @@ function showCard(
   ignoreBtn.textContent = 'Ignore';
   ignoreBtn.addEventListener('click', (e) => {
     e.stopPropagation();
-    onIgnore();
     closeCard();
+    onIgnore();
   });
   actions.appendChild(ignoreBtn);
 
@@ -148,8 +154,8 @@ function showCard(
   ignoreAllBtn.textContent = 'Ignore all';
   ignoreAllBtn.addEventListener('click', (e) => {
     e.stopPropagation();
-    onIgnoreAll();
     closeCard();
+    onIgnoreAll();
   });
   actions.appendChild(ignoreAllBtn);
 
@@ -633,8 +639,25 @@ export class AnnotationManager {
     const textNodes = this.buildNodeMap();
     let unresolvedIssueCount = 0;
     let rectFailureCount = 0;
+    let cappedCount = 0;
+
+    // Use a DocumentFragment to batch all mark appends into a single DOM write
+    const fragment = document.createDocumentFragment();
 
     for (const issue of issues) {
+      // Cap overlay mark count to avoid excessive DOM churn
+      if (this.overlayMarks.length >= MAX_OVERLAY_MARKS) {
+        cappedCount = issues.length - issues.indexOf(issue);
+        logHistoryEvent('checker:overlay-capped', {
+          ...getAnnotationElementLogData(this.element),
+          cap: MAX_OVERLAY_MARKS,
+          totalIssues: issues.length,
+          renderedMarks: this.overlayMarks.length,
+          skippedIssues: cappedCount,
+        });
+        break;
+      }
+
       const resolvedRange = resolveIssueRange(fullText, issue);
       if (!resolvedRange) {
         unresolvedIssueCount += 1;
@@ -661,11 +684,15 @@ export class AnnotationManager {
       }
 
       for (const rect of rects) {
+        if (this.overlayMarks.length >= MAX_OVERLAY_MARKS) break;
         const mark = this.createOverlayMark(issue, rect);
-        overlayRoot.appendChild(mark);
+        fragment.appendChild(mark);
         this.overlayMarks.push(mark);
       }
     }
+
+    // Single DOM write for all marks
+    overlayRoot.appendChild(fragment);
 
     if (this.overlayMarks.length === 0) {
       this.clearOverlayMarks();
@@ -685,6 +712,7 @@ export class AnnotationManager {
         surroundFailureCount: 0,
         unresolvedIssueCount,
         rectFailureCount,
+        cappedCount,
         elapsedMs: getElapsedMs(startedAt),
       }, { level: rectFailureCount > 0 || unresolvedIssueCount > 0 ? 'warn' : 'debug' });
     }
