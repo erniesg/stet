@@ -11,7 +11,7 @@ import { listPacks } from './engine.js';
 export const DEFAULT_RESOLVED_CONFIG: ResolvedStetConfig = {
   packs: ['common'],
   language: 'en-GB',
-  role: 'subeditor',
+  role: 'journalist',
   packConfig: {
     freThreshold: 30,
     paragraphCharLimit: 320,

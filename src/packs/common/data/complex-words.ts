@@ -213,7 +213,6 @@ export const COMPLEX_WORDS: Record<string, string[]> = {
     "foster": ["encourage", "help"],
     "impact": ["affect", "influence"],
     "incentivise": ["encourage", "motivate"],
-    "key": ["important", "main"],
     "leverage": ["use", "influence"],
     "liaise": ["work with"],
     "robust": ["strong", "thorough"],

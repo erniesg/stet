@@ -1,6 +1,6 @@
 import { render } from 'preact';
 import { useEffect, useState } from 'preact/hooks';
-import { diffLines, diffText, type DiffLine } from '../content/version-history-diff.js';
+import { diffText, type DiffChunk } from '../content/version-history-diff.js';
 import type { EditableHistoryRecord, VersionSnapshot } from '../content/version-history-core.js';
 import { normalizeSiteAllowlist } from '../host-access.js';
 import { getHistoryRefreshTarget } from './popup-sync.js';
@@ -89,7 +89,7 @@ function formatSuggestion(issue: PopupIssue): string {
 function Popup() {
   const [enabled, setEnabled] = useState(true);
   const [packs, setPacks] = useState<string[]>([]);
-  const [role, setRole] = useState('subeditor');
+  const [role, setRole] = useState('journalist');
   const [loading, setLoading] = useState(true);
   const [activeTabId, setActiveTabId] = useState<number | null>(null);
   const [activeHostname, setActiveHostname] = useState<string | null>(null);
@@ -119,9 +119,6 @@ function Popup() {
   const historyDiff = selectedSnapshot && historyLiveEditorAvailable
     ? diffText(historyCurrentText, selectedSnapshot.content)
     : null;
-  const historyLineDiff = selectedSnapshot && historyLiveEditorAvailable
-    ? diffLines(historyCurrentText, selectedSnapshot.content)
-    : null;
   const currentSiteScoped = activeHostname
     ? siteAllowlist.length === 0 || siteAllowlist.some((entry) => activeHostname === entry || activeHostname.endsWith(`.${entry}`))
     : false;
@@ -131,7 +128,7 @@ function Popup() {
       if (resp?.config) {
         setEnabled(resp.config.enabled);
         setPacks(resp.config.packs || []);
-        setRole(resp.config.role || 'subeditor');
+        setRole(resp.config.role || 'journalist');
       }
       setLoading(false);
     });
@@ -255,17 +252,18 @@ function Popup() {
 
   const changeRole = (newRole: string) => {
     setRole(newRole);
+    // Save override first, then reload content script config once save is confirmed
     chrome.runtime.sendMessage({
       type: 'UPDATE_USER_OVERRIDES',
       overrides: { role: newRole },
-    });
-    chrome.runtime.sendMessage({ type: 'GET_SETTINGS' }, (resp) => {
-      if (resp?.config) {
-        chrome.runtime.sendMessage({
-          type: 'SET_RESOLVED_CONFIG',
-          config: { ...resp.config, role: newRole },
+    }, () => {
+      // Save confirmed — now tell the content script to reload and re-check
+      withActiveTab((tabId) => {
+        chrome.tabs.sendMessage(tabId, { type: 'RELOAD_CONFIG_AND_RECHECK' }, () => {
+          if (chrome.runtime.lastError) { /* tab may not have content script */ }
+          refreshIssues();
         });
-      }
+      });
     });
   };
 
@@ -794,14 +792,14 @@ function Popup() {
                   ? historyLiveEditorAvailable && historyDiff
                     ? historyDiff.addedChars === 0 && historyDiff.removedChars === 0
                       ? 'Selected version matches the current editor text.'
-                      : `+${historyDiff.addedChars.toLocaleString()} / -${historyDiff.removedChars.toLocaleString()} chars if restored.`
+                      : renderDiffStat(historyDiff.addedChars, historyDiff.removedChars)
                     : 'Live editor unavailable. Re-focus the field on the page to compare or restore.'
                   : 'Pick a saved version to inspect it.'}
               </div>
               <div style={styles.historyDiffBox}>
                 {selectedSnapshot
-                  ? historyLiveEditorAvailable && historyLineDiff
-                    ? renderGitDiffPreview(historyLineDiff)
+                  ? historyLiveEditorAvailable && historyDiff
+                    ? renderInlineDiffPreview(historyDiff.chunks)
                     : <pre style={styles.historySnapshotText}>{selectedSnapshot.content}</pre>
                   : <span style={styles.emptyState}>No diff preview available.</span>}
               </div>
@@ -943,26 +941,47 @@ function formatAbsoluteDate(dateString: string): string {
   }).format(new Date(dateString));
 }
 
-function renderGitDiffPreview(lines: DiffLine[]) {
-  if (lines.length === 0) {
+function renderInlineDiffPreview(chunks: DiffChunk[]) {
+  if (chunks.length === 0) {
     return <span style={styles.emptyState}>No textual differences.</span>;
   }
 
-  return lines.map((line, index) => {
-    const marker = line.type === 'insert' ? '+' : line.type === 'delete' ? '-' : ' ';
-    const rowStyle = line.type === 'insert'
-      ? styles.diffRowInsert
-      : line.type === 'delete'
-        ? styles.diffRowDelete
-        : styles.diffRowEqual;
-
-    return (
-      <div key={`${line.type}:${index}:${line.value.slice(0, 24)}`} style={{ ...styles.diffRow, ...rowStyle }}>
-        <span style={styles.diffMarker}>{marker}</span>
-        <span style={styles.diffLineText}>{line.value || ' '}</span>
-      </div>
-    );
+  return chunks.map((chunk, index) => {
+    if (chunk.type === 'insert') {
+      return <ins key={index} style={styles.diffInsert}>{chunk.value}</ins>;
+    }
+    if (chunk.type === 'delete') {
+      return <del key={index} style={styles.diffDelete}>{chunk.value}</del>;
+    }
+    return <span key={index}>{chunk.value}</span>;
   });
+}
+
+function renderDiffStat(added: number, removed: number) {
+  const total = added + removed;
+  const BLOCKS = 5;
+  const addBlocks = total > 0 ? Math.max(added > 0 ? 1 : 0, Math.round((added / total) * BLOCKS)) : 0;
+  const removeBlocks = total > 0 ? BLOCKS - addBlocks : 0;
+
+  return (
+    <span style={styles.diffStat}>
+      <span style={styles.diffStatAdd}>+{added}</span>
+      {' '}
+      <span style={styles.diffStatRemove}>-{removed}</span>
+      {' '}
+      <span style={styles.diffStatBar}>
+        {Array.from({ length: addBlocks }, (_, i) => (
+          <span key={`a${i}`} style={styles.diffStatBlockAdd}>■</span>
+        ))}
+        {Array.from({ length: removeBlocks }, (_, i) => (
+          <span key={`r${i}`} style={styles.diffStatBlockRemove}>■</span>
+        ))}
+        {total === 0 && Array.from({ length: BLOCKS }, (_, i) => (
+          <span key={`n${i}`} style={styles.diffStatBlockNeutral}>■</span>
+        ))}
+      </span>
+    </span>
+  );
 }
 
 function getActiveTargetKey(state: PopupIssuesState): string | null {
@@ -1260,34 +1279,29 @@ const styles: Record<string, Record<string, string | number>> = {
     wordBreak: 'break-word',
     fontFamily: 'inherit',
   },
-  diffRow: {
-    display: 'grid',
-    gridTemplateColumns: '14px minmax(0, 1fr)',
-    gap: '8px',
-    padding: '2px 6px',
-    borderRadius: '4px',
-    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
-    whiteSpace: 'pre-wrap',
-    wordBreak: 'break-word',
-  },
-  diffRowEqual: {
-    color: '#475569',
-  },
-  diffRowInsert: {
+  diffInsert: {
+    background: 'rgba(34, 197, 94, 0.18)',
     color: '#166534',
-    background: 'rgba(34, 197, 94, 0.14)',
+    textDecoration: 'none',
   },
-  diffRowDelete: {
+  diffDelete: {
+    background: 'rgba(239, 68, 68, 0.18)',
     color: '#991b1b',
-    background: 'rgba(239, 68, 68, 0.14)',
+    textDecoration: 'line-through',
   },
-  diffMarker: {
-    fontWeight: '700',
-    textAlign: 'center',
+  diffStat: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '4px',
+    fontSize: '12px',
+    fontWeight: '600',
   },
-  diffLineText: {
-    minWidth: 0,
-  },
+  diffStatAdd: { color: '#166534' },
+  diffStatRemove: { color: '#991b1b' },
+  diffStatBar: { display: 'inline-flex', gap: '1px', fontSize: '10px' },
+  diffStatBlockAdd: { color: '#22c55e' },
+  diffStatBlockRemove: { color: '#ef4444' },
+  diffStatBlockNeutral: { color: '#d1d5db' },
   issueRow: {
     display: 'flex',
     gap: '10px',

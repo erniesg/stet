@@ -860,6 +860,18 @@ function registerRuntimeHandlers() {
 
   try {
     chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+      if (message?.type === 'RELOAD_CONFIG_AND_RECHECK') {
+        loadConfig().then((newConfig) => {
+          // Preserve actual registered packs
+          const registered = listPacks().map(p => p.id);
+          config = { ...newConfig, packs: registered };
+          refreshAllChecks();
+          syncPageState();
+          sendResponse(getPopupIssuesState());
+        });
+        return true;
+      }
+
       if (message?.type === 'GET_PAGE_ISSUES') {
         sendResponse(getPopupIssuesState());
         return false;

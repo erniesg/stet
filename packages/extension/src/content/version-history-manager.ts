@@ -3,7 +3,7 @@ import {
   getEditableTarget,
   type EditableTarget,
 } from './editable-target.js';
-import { diffLines, diffText } from './version-history-diff.js';
+import { diffText, type DiffChunk } from './version-history-diff.js';
 import {
   DEFAULT_HISTORY_POLICY,
   type EditableHistoryRecord,
@@ -680,14 +680,16 @@ export class VersionHistoryManager {
 
     const currentText = session.target.read();
     const diff = diffText(currentText, selected.content);
-    const lineDiff = diffLines(currentText, selected.content);
     const unchanged = diff.addedChars === 0 && diff.removedChars === 0;
 
-    this.previewSummary.textContent = unchanged
-      ? 'Selected version matches the current draft.'
-      : `+${diff.addedChars.toLocaleString()} / -${diff.removedChars.toLocaleString()} chars if restored.`;
+    this.previewSummary.textContent = '';
+    if (unchanged) {
+      this.previewSummary.textContent = 'Selected version matches the current draft.';
+    } else {
+      this.previewSummary.replaceChildren(renderDiffStat(diff.addedChars, diff.removedChars));
+    }
 
-    this.previewDiff.replaceChildren(renderDiffLines(lineDiff));
+    this.previewDiff.replaceChildren(renderInlineDiff(diff.chunks));
     this.restoreButton.disabled = unchanged;
     this.updateFloatingPosition('render-panel');
   }
@@ -1086,10 +1088,10 @@ function readHistoryUiModeOverride(): HistoryUiMode | undefined {
   return undefined;
 }
 
-function renderDiffLines(lines: ReturnType<typeof diffLines>): DocumentFragment {
+function renderInlineDiff(chunks: DiffChunk[]): DocumentFragment {
   const fragment = document.createDocumentFragment();
 
-  if (lines.length === 0) {
+  if (chunks.length === 0) {
     const note = document.createElement('p');
     note.className = 'stet-history-preview-note';
     note.textContent = 'No textual differences.';
@@ -1097,20 +1099,53 @@ function renderDiffLines(lines: ReturnType<typeof diffLines>): DocumentFragment 
     return fragment;
   }
 
-  for (const line of lines) {
-    const row = document.createElement('div');
-    row.className = `stet-history-diff-line is-${line.type}`;
+  for (const chunk of chunks) {
+    if (chunk.type === 'insert') {
+      const ins = document.createElement('ins');
+      ins.className = 'stet-history-diff-ins';
+      ins.textContent = chunk.value;
+      fragment.append(ins);
+    } else if (chunk.type === 'delete') {
+      const del = document.createElement('del');
+      del.className = 'stet-history-diff-del';
+      del.textContent = chunk.value;
+      fragment.append(del);
+    } else {
+      fragment.append(document.createTextNode(chunk.value));
+    }
+  }
 
-    const marker = document.createElement('span');
-    marker.className = 'stet-history-diff-marker';
-    marker.textContent = line.type === 'insert' ? '+' : line.type === 'delete' ? '-' : ' ';
+  return fragment;
+}
 
-    const text = document.createElement('span');
-    text.className = 'stet-history-diff-text';
-    text.textContent = line.value || ' ';
+function renderDiffStat(added: number, removed: number): DocumentFragment {
+  const fragment = document.createDocumentFragment();
+  const BLOCKS = 5;
+  const total = added + removed;
+  const addBlocks = total > 0 ? Math.max(added > 0 ? 1 : 0, Math.round((added / total) * BLOCKS)) : 0;
+  const removeBlocks = total > 0 ? BLOCKS - addBlocks : 0;
 
-    row.append(marker, text);
-    fragment.append(row);
+  const addSpan = document.createElement('span');
+  addSpan.className = 'stet-history-stat-add';
+  addSpan.textContent = `+${added}`;
+
+  const removeSpan = document.createElement('span');
+  removeSpan.className = 'stet-history-stat-remove';
+  removeSpan.textContent = ` -${removed} `;
+
+  fragment.append(addSpan, removeSpan);
+
+  for (let i = 0; i < addBlocks; i++) {
+    const block = document.createElement('span');
+    block.className = 'stet-history-stat-block-add';
+    block.textContent = '■';
+    fragment.append(block);
+  }
+  for (let i = 0; i < removeBlocks; i++) {
+    const block = document.createElement('span');
+    block.className = 'stet-history-stat-block-remove';
+    block.textContent = '■';
+    fragment.append(block);
   }
 
   return fragment;
