@@ -367,7 +367,7 @@ export class VersionHistoryManager {
     this.headerTitle.className = 'stet-history-panel-target';
     this.headerMeta.className = 'stet-history-panel-subtitle';
 
-    titleGroup.append(heading, this.headerTitle, this.headerMeta);
+    titleGroup.append(heading, this.headerTitle);
 
     const closeButton = document.createElement('button');
     closeButton.className = 'stet-history-close';
@@ -384,12 +384,11 @@ export class VersionHistoryManager {
       });
     });
 
-    header.append(titleGroup, closeButton);
+    // Inline actions in header row (matches popup layout)
+    const headerActions = document.createElement('div');
+    headerActions.className = 'stet-history-header-actions';
 
-    const actions = document.createElement('div');
-    actions.className = 'stet-history-actions';
-
-    this.snapshotNowButton.className = 'stet-history-secondary-btn';
+    this.snapshotNowButton.className = 'stet-history-link-btn';
     this.snapshotNowButton.type = 'button';
     this.snapshotNowButton.textContent = 'Snapshot now';
     this.snapshotNowButton.addEventListener('click', () => {
@@ -398,14 +397,11 @@ export class VersionHistoryManager {
       });
     });
 
-    actions.append(this.snapshotNowButton);
+    headerActions.append(this.snapshotNowButton, closeButton);
+    header.append(titleGroup, headerActions);
 
     const listSection = document.createElement('section');
     listSection.className = 'stet-history-section';
-
-    const listHeading = document.createElement('div');
-    listHeading.className = 'stet-history-section-heading';
-    listHeading.textContent = 'Saved versions';
 
     this.versionsList.className = 'stet-history-list';
     this.versionsList.addEventListener('click', (event) => {
@@ -422,14 +418,10 @@ export class VersionHistoryManager {
     this.emptyState.className = 'stet-history-empty';
     this.emptyState.textContent = 'Start typing and Stet will save local drafts every few seconds. Older history collapses to bigger milestones.';
 
-    listSection.append(listHeading, this.versionsList, this.emptyState);
+    listSection.append(this.versionsList, this.emptyState);
 
     const previewSection = document.createElement('section');
     previewSection.className = 'stet-history-section stet-history-preview';
-
-    const previewHeading = document.createElement('div');
-    previewHeading.className = 'stet-history-section-heading';
-    previewHeading.textContent = 'Compare with current draft';
 
     this.previewSummary.className = 'stet-history-preview-summary';
     this.previewDiff.className = 'stet-history-diff';
@@ -443,9 +435,9 @@ export class VersionHistoryManager {
       });
     });
 
-    previewSection.append(previewHeading, this.previewSummary, this.previewDiff, this.restoreButton);
+    previewSection.append(this.previewSummary, this.previewDiff, this.restoreButton);
 
-    this.panel.append(header, actions, listSection, previewSection);
+    this.panel.append(header, listSection, previewSection);
     this.root.append(this.button, this.panel);
 
     (document.body ?? document.documentElement).appendChild(this.root);
@@ -648,8 +640,8 @@ export class VersionHistoryManager {
     const snapshots = record?.snapshots ?? [];
     const selected = snapshots.find((snapshot) => snapshot.id === this.selectedSnapshotId) ?? null;
 
-    this.headerTitle.textContent = session.target.label;
-    this.headerMeta.textContent = session.target.descriptor;
+    const count = snapshots.length;
+    this.headerTitle.textContent = `${count} saved version${count !== 1 ? 's' : ''} · ${session.target.label}`;
     this.emptyState.hidden = snapshots.length > 0;
     this.versionsList.replaceChildren();
 

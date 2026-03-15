@@ -313,19 +313,10 @@ stet-mark:hover {
 }
 
 .stet-history-panel-target {
-  margin-top: 4px;
-  font-size: 13px;
-  font-weight: 600;
-  color: #0f172a;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.stet-history-panel-subtitle {
   margin-top: 2px;
-  font-size: 11px;
-  color: #64748b;
+  font-size: 12px;
+  font-weight: 500;
+  color: #475569;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -347,9 +338,27 @@ stet-mark:hover {
   background: #e2e8f0;
 }
 
-.stet-history-actions {
+.stet-history-header-actions {
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.stet-history-link-btn {
+  background: none;
+  border: none;
+  color: #6366f1;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 0;
+  white-space: nowrap;
+}
+
+.stet-history-link-btn:hover {
+  color: #4f46e5;
+  text-decoration: underline;
 }
 
 .stet-history-section {
