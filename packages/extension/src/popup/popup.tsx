@@ -1,6 +1,7 @@
 import { render } from 'preact';
-import { useEffect, useState } from 'preact/hooks';
-import { diffText, type DiffChunk } from '../content/version-history-diff.js';
+import { useEffect, useRef, useState } from 'preact/hooks';
+import { diffText } from '../content/version-history-diff.js';
+import { createInlineDiff, createDiffStat } from '../shared/diff-renderer.js';
 import type { EditableHistoryRecord, VersionSnapshot } from '../content/version-history-core.js';
 import { normalizeSiteAllowlist } from '../host-access.js';
 import { getHistoryRefreshTarget } from './popup-sync.js';
@@ -787,22 +788,16 @@ function Popup() {
             </div>
 
             <div style={styles.historyPreview}>
-              <div style={styles.historyPreviewSummary}>
-                {selectedSnapshot
-                  ? historyLiveEditorAvailable && historyDiff
-                    ? historyDiff.addedChars === 0 && historyDiff.removedChars === 0
-                      ? 'Selected version matches the current editor text.'
-                      : renderDiffStat(historyDiff.addedChars, historyDiff.removedChars)
-                    : 'Live editor unavailable. Re-focus the field on the page to compare or restore.'
-                  : 'Pick a saved version to inspect it.'}
-              </div>
-              <div style={styles.historyDiffBox}>
-                {selectedSnapshot
-                  ? historyLiveEditorAvailable && historyDiff
-                    ? renderInlineDiffPreview(historyDiff.chunks)
-                    : <pre style={styles.historySnapshotText}>{selectedSnapshot.content}</pre>
-                  : <span style={styles.emptyState}>No diff preview available.</span>}
-              </div>
+              <DiffSummary
+                snapshot={selectedSnapshot}
+                diff={historyDiff}
+                editorAvailable={historyLiveEditorAvailable}
+              />
+              <DiffBox
+                snapshot={selectedSnapshot}
+                diff={historyDiff}
+                editorAvailable={historyLiveEditorAvailable}
+              />
             </div>
 
             <button
@@ -941,47 +936,54 @@ function formatAbsoluteDate(dateString: string): string {
   }).format(new Date(dateString));
 }
 
-function renderInlineDiffPreview(chunks: DiffChunk[]) {
-  if (chunks.length === 0) {
-    return <span style={styles.emptyState}>No textual differences.</span>;
-  }
+/** Thin Preact wrapper — mounts shared DOM diff stat into popup */
+function DiffSummary({ snapshot, diff, editorAvailable }: {
+  snapshot: VersionSnapshot | null;
+  diff: { addedChars: number; removedChars: number } | null;
+  editorAvailable: boolean;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
 
-  return chunks.map((chunk, index) => {
-    if (chunk.type === 'insert') {
-      return <ins key={index} style={styles.diffInsert}>{chunk.value}</ins>;
+  useEffect(() => {
+    if (!ref.current) return;
+    if (snapshot && editorAvailable && diff) {
+      if (diff.addedChars === 0 && diff.removedChars === 0) {
+        ref.current.textContent = 'Selected version matches the current editor text.';
+      } else {
+        ref.current.textContent = '';
+        ref.current.appendChild(createDiffStat(diff.addedChars, diff.removedChars));
+      }
+    } else if (snapshot) {
+      ref.current.textContent = 'Live editor unavailable. Re-focus the field on the page to compare or restore.';
+    } else {
+      ref.current.textContent = 'Pick a saved version to inspect it.';
     }
-    if (chunk.type === 'delete') {
-      return <del key={index} style={styles.diffDelete}>{chunk.value}</del>;
-    }
-    return <span key={index}>{chunk.value}</span>;
-  });
+  }, [snapshot, diff, editorAvailable]);
+
+  return <div ref={ref} style={styles.historyPreviewSummary} />;
 }
 
-function renderDiffStat(added: number, removed: number) {
-  const total = added + removed;
-  const BLOCKS = 5;
-  const addBlocks = total > 0 ? Math.max(added > 0 ? 1 : 0, Math.round((added / total) * BLOCKS)) : 0;
-  const removeBlocks = total > 0 ? BLOCKS - addBlocks : 0;
+/** Thin Preact wrapper — mounts shared DOM inline diff into popup */
+function DiffBox({ snapshot, diff, editorAvailable }: {
+  snapshot: VersionSnapshot | null;
+  diff: { chunks: import('../content/version-history-diff.js').DiffChunk[] } | null;
+  editorAvailable: boolean;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
 
-  return (
-    <span style={styles.diffStat}>
-      <span style={styles.diffStatAdd}>+{added}</span>
-      {' '}
-      <span style={styles.diffStatRemove}>-{removed}</span>
-      {' '}
-      <span style={styles.diffStatBar}>
-        {Array.from({ length: addBlocks }, (_, i) => (
-          <span key={`a${i}`} style={styles.diffStatBlockAdd}>■</span>
-        ))}
-        {Array.from({ length: removeBlocks }, (_, i) => (
-          <span key={`r${i}`} style={styles.diffStatBlockRemove}>■</span>
-        ))}
-        {total === 0 && Array.from({ length: BLOCKS }, (_, i) => (
-          <span key={`n${i}`} style={styles.diffStatBlockNeutral}>■</span>
-        ))}
-      </span>
-    </span>
-  );
+  useEffect(() => {
+    if (!ref.current) return;
+    if (snapshot && editorAvailable && diff) {
+      ref.current.textContent = '';
+      ref.current.appendChild(createInlineDiff(diff.chunks));
+    } else if (snapshot) {
+      ref.current.textContent = snapshot.content;
+    } else {
+      ref.current.textContent = 'No diff preview available.';
+    }
+  }, [snapshot, diff, editorAvailable]);
+
+  return <div ref={ref} style={styles.historyDiffBox} />;
 }
 
 function getActiveTargetKey(state: PopupIssuesState): string | null {
@@ -1273,35 +1275,6 @@ const styles: Record<string, Record<string, string | number>> = {
     maxHeight: '180px',
     overflowY: 'auto',
   },
-  historySnapshotText: {
-    margin: 0,
-    whiteSpace: 'pre-wrap',
-    wordBreak: 'break-word',
-    fontFamily: 'inherit',
-  },
-  diffInsert: {
-    background: 'rgba(34, 197, 94, 0.18)',
-    color: '#166534',
-    textDecoration: 'none',
-  },
-  diffDelete: {
-    background: 'rgba(239, 68, 68, 0.18)',
-    color: '#991b1b',
-    textDecoration: 'line-through',
-  },
-  diffStat: {
-    display: 'inline-flex',
-    alignItems: 'center',
-    gap: '4px',
-    fontSize: '12px',
-    fontWeight: '600',
-  },
-  diffStatAdd: { color: '#166534' },
-  diffStatRemove: { color: '#991b1b' },
-  diffStatBar: { display: 'inline-flex', gap: '1px', fontSize: '10px' },
-  diffStatBlockAdd: { color: '#22c55e' },
-  diffStatBlockRemove: { color: '#ef4444' },
-  diffStatBlockNeutral: { color: '#d1d5db' },
   issueRow: {
     display: 'flex',
     gap: '10px',

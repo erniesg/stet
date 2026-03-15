@@ -3,7 +3,8 @@ import {
   getEditableTarget,
   type EditableTarget,
 } from './editable-target.js';
-import { diffText, type DiffChunk } from './version-history-diff.js';
+import { diffText } from './version-history-diff.js';
+import { createInlineDiff, createDiffStat } from '../shared/diff-renderer.js';
 import {
   DEFAULT_HISTORY_POLICY,
   type EditableHistoryRecord,
@@ -686,10 +687,10 @@ export class VersionHistoryManager {
     if (unchanged) {
       this.previewSummary.textContent = 'Selected version matches the current draft.';
     } else {
-      this.previewSummary.replaceChildren(renderDiffStat(diff.addedChars, diff.removedChars));
+      this.previewSummary.replaceChildren(createDiffStat(diff.addedChars, diff.removedChars));
     }
 
-    this.previewDiff.replaceChildren(renderInlineDiff(diff.chunks));
+    this.previewDiff.replaceChildren(createInlineDiff(diff.chunks));
     this.restoreButton.disabled = unchanged;
     this.updateFloatingPosition('render-panel');
   }
@@ -1086,69 +1087,6 @@ function readHistoryUiModeOverride(): HistoryUiMode | undefined {
   }
 
   return undefined;
-}
-
-function renderInlineDiff(chunks: DiffChunk[]): DocumentFragment {
-  const fragment = document.createDocumentFragment();
-
-  if (chunks.length === 0) {
-    const note = document.createElement('p');
-    note.className = 'stet-history-preview-note';
-    note.textContent = 'No textual differences.';
-    fragment.append(note);
-    return fragment;
-  }
-
-  for (const chunk of chunks) {
-    if (chunk.type === 'insert') {
-      const ins = document.createElement('ins');
-      ins.className = 'stet-history-diff-ins';
-      ins.textContent = chunk.value;
-      fragment.append(ins);
-    } else if (chunk.type === 'delete') {
-      const del = document.createElement('del');
-      del.className = 'stet-history-diff-del';
-      del.textContent = chunk.value;
-      fragment.append(del);
-    } else {
-      fragment.append(document.createTextNode(chunk.value));
-    }
-  }
-
-  return fragment;
-}
-
-function renderDiffStat(added: number, removed: number): DocumentFragment {
-  const fragment = document.createDocumentFragment();
-  const BLOCKS = 5;
-  const total = added + removed;
-  const addBlocks = total > 0 ? Math.max(added > 0 ? 1 : 0, Math.round((added / total) * BLOCKS)) : 0;
-  const removeBlocks = total > 0 ? BLOCKS - addBlocks : 0;
-
-  const addSpan = document.createElement('span');
-  addSpan.className = 'stet-history-stat-add';
-  addSpan.textContent = `+${added}`;
-
-  const removeSpan = document.createElement('span');
-  removeSpan.className = 'stet-history-stat-remove';
-  removeSpan.textContent = ` -${removed} `;
-
-  fragment.append(addSpan, removeSpan);
-
-  for (let i = 0; i < addBlocks; i++) {
-    const block = document.createElement('span');
-    block.className = 'stet-history-stat-block-add';
-    block.textContent = '■';
-    fragment.append(block);
-  }
-  for (let i = 0; i < removeBlocks; i++) {
-    const block = document.createElement('span');
-    block.className = 'stet-history-stat-block-remove';
-    block.textContent = '■';
-    fragment.append(block);
-  }
-
-  return fragment;
 }
 
 function formatVersionLabel(snapshot: VersionSnapshot): string {
