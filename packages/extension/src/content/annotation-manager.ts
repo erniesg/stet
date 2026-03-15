@@ -8,11 +8,18 @@
  */
 
 import type { Issue } from 'stet';
+import {
+  collectGoogleDocsIssueRects,
+  extractGoogleDocsRenderedText,
+  isGoogleDocsSurfaceRoot,
+} from './google-docs-surface.js';
 import { resolveIssueRange } from './issue-range.js';
 import { getElapsedMs, getNow, logHistoryEvent } from './version-history-debug.js';
 
 const TAG = 'stet-mark';
 const MAX_OVERLAY_MARKS = 50;
+const CARD_VIEWPORT_MARGIN = 8;
+const CARD_GAP = 6;
 
 /** Currently open popup card */
 let activeCard: HTMLElement | null = null;
@@ -26,6 +33,84 @@ interface AnnotationManagerOptions {
 }
 
 export type AnnotationRenderMode = 'inline' | 'overlay';
+
+interface PopupViewport {
+  width: number;
+  height: number;
+  scrollX: number;
+  scrollY: number;
+}
+
+interface PopupCardSize {
+  width: number;
+  height: number;
+}
+
+interface PopupCardPosition {
+  left: number;
+  top: number;
+  placement: 'above' | 'below';
+}
+
+const EXTENSION_UI_SELECTOR = '.stet-overlay-root, .stet-history-root, .stet-card, .stet-issues-root';
+
+function clamp(value: number, min: number, max: number): number {
+  if (min > max) return min;
+  return Math.min(Math.max(value, min), max);
+}
+
+function getPopupViewport(): PopupViewport {
+  return {
+    width: window.innerWidth,
+    height: window.innerHeight,
+    scrollX: window.scrollX,
+    scrollY: window.scrollY,
+  };
+}
+
+function getPopupCardSize(card: HTMLElement): PopupCardSize {
+  const rect = card.getBoundingClientRect();
+  return {
+    width: rect.width || card.offsetWidth || 0,
+    height: rect.height || card.offsetHeight || 0,
+  };
+}
+
+export function computeCardPosition(
+  anchorRect: Pick<DOMRect, 'left' | 'top' | 'right' | 'bottom'>,
+  cardSize: PopupCardSize,
+  viewport: PopupViewport,
+): PopupCardPosition {
+  const viewportLeft = viewport.scrollX + CARD_VIEWPORT_MARGIN;
+  const viewportRight = viewport.scrollX + viewport.width - CARD_VIEWPORT_MARGIN;
+  const viewportTop = viewport.scrollY + CARD_VIEWPORT_MARGIN;
+  const viewportBottom = viewport.scrollY + viewport.height - CARD_VIEWPORT_MARGIN;
+
+  const anchorLeft = anchorRect.left + viewport.scrollX;
+  const anchorTop = anchorRect.top + viewport.scrollY;
+  const anchorBottom = anchorRect.bottom + viewport.scrollY;
+
+  const maxLeft = Math.max(viewportLeft, viewportRight - cardSize.width);
+  const left = clamp(anchorLeft, viewportLeft, maxLeft);
+
+  const belowTop = anchorBottom + CARD_GAP;
+  const aboveTop = anchorTop - cardSize.height - CARD_GAP;
+  const fitsBelow = belowTop + cardSize.height <= viewportBottom;
+  const fitsAbove = aboveTop >= viewportTop;
+  const spaceBelow = viewportBottom - belowTop;
+  const spaceAbove = anchorTop - CARD_GAP - viewportTop;
+
+  const placement: 'above' | 'below' =
+    fitsBelow || (!fitsAbove && spaceBelow >= spaceAbove)
+      ? 'below'
+      : 'above';
+
+  const preferredTop = placement === 'below' ? belowTop : aboveTop;
+  const maxTop = Math.max(viewportTop, viewportBottom - cardSize.height);
+  const top = clamp(preferredTop, viewportTop, maxTop);
+
+  return { left, top, placement };
+}
 
 function unwrapMark(mark: Element): void {
   const parent = mark.parentNode;
@@ -161,17 +246,15 @@ function showCard(
 
   card.appendChild(actions);
 
-  // Position the card below the mark
+  // Position the card next to the mark while keeping it inside the viewport.
   document.body.appendChild(card);
-  const rect = mark.getBoundingClientRect();
-  card.style.left = `${Math.max(8, rect.left + window.scrollX)}px`;
-  card.style.top = `${rect.bottom + window.scrollY + 6}px`;
-
-  // Keep card in viewport
-  const cardRect = card.getBoundingClientRect();
-  if (cardRect.right > window.innerWidth - 8) {
-    card.style.left = `${window.innerWidth - cardRect.width - 8 + window.scrollX}px`;
-  }
+  const position = computeCardPosition(
+    mark.getBoundingClientRect(),
+    getPopupCardSize(card),
+    getPopupViewport(),
+  );
+  card.style.left = `${position.left}px`;
+  card.style.top = `${position.top}px`;
 
   activeCard = card;
 }
@@ -190,10 +273,12 @@ export class AnnotationManager {
   private dismissedFingerprints = new Set<string>();
   private overlayTracking = false;
   private overlayRefreshFrame: number | null = null;
+  private overlaySuppressed = false;
 
   private readonly handleOverlayViewportChange = () => {
     if (this.lastMode !== 'overlay') return;
     if (this.lastIssues.length === 0) return;
+    if (this.overlaySuppressed) return;
     if (!this.element.isConnected) {
       this.clear();
       return;
@@ -204,6 +289,30 @@ export class AnnotationManager {
       this.overlayRefreshFrame = null;
       this.renderOverlayAnnotations(this.getVisibleIssues(this.lastIssues), false);
     });
+  };
+
+  private readonly handleDocumentPointerDown = (event: Event) => {
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+
+    if (this.isWithinManagedUi(target)) {
+      this.restoreOverlayVisibility();
+      return;
+    }
+
+    this.suppressOverlayVisibility();
+  };
+
+  private readonly handleDocumentFocusIn = (event: FocusEvent) => {
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+
+    if (this.isWithinManagedUi(target)) {
+      this.restoreOverlayVisibility();
+      return;
+    }
+
+    this.suppressOverlayVisibility();
   };
 
   constructor(element: HTMLElement, options: AnnotationManagerOptions = {}) {
@@ -387,6 +496,7 @@ export class AnnotationManager {
       disposeMark(mark);
     }
     this.overlayMarks = [];
+    this.overlaySuppressed = false;
     if (this.overlayRoot) {
       this.overlayRoot.remove();
       this.overlayRoot = null;
@@ -635,8 +745,11 @@ export class AnnotationManager {
     }
 
     const overlayRoot = this.ensureOverlayRoot();
-    const fullText = this.element.innerText || this.element.textContent || '';
-    const textNodes = this.buildNodeMap();
+    const isGoogleDocs = isGoogleDocsSurfaceRoot(this.element);
+    const fullText = isGoogleDocs
+      ? extractGoogleDocsRenderedText(this.element)
+      : (this.element.innerText || this.element.textContent || '');
+    const textNodes = isGoogleDocs ? [] : this.buildNodeMap();
     let unresolvedIssueCount = 0;
     let rectFailureCount = 0;
     let cappedCount = 0;
@@ -664,20 +777,9 @@ export class AnnotationManager {
         continue;
       }
 
-      const start = this.resolveOffsetToDomPoint(resolvedRange.start, textNodes);
-      const end = this.resolveOffsetToDomPoint(resolvedRange.end, textNodes);
-      const range = document.createRange();
-
-      try {
-        range.setStart(start.node, start.offset);
-        range.setEnd(end.node, end.offset);
-      } catch {
-        rectFailureCount += 1;
-        continue;
-      }
-
-      const rects = Array.from(range.getClientRects())
-        .filter((rect) => rect.width > 0 && rect.height > 0);
+      const rects = isGoogleDocs
+        ? collectGoogleDocsIssueRects(this.element, resolvedRange.start, resolvedRange.end, fullText)
+        : this.collectDomRangeRects(textNodes, resolvedRange.start, resolvedRange.end);
       if (rects.length === 0) {
         rectFailureCount += 1;
         continue;
@@ -724,9 +826,57 @@ export class AnnotationManager {
     const root = document.createElement('div');
     root.className = 'stet-overlay-root';
     root.setAttribute('aria-hidden', 'true');
+    root.hidden = this.overlaySuppressed;
     (document.body ?? document.documentElement).appendChild(root);
     this.overlayRoot = root;
     return root;
+  }
+
+  private isWithinManagedUi(target: Element): boolean {
+    if (this.element.contains(target)) return true;
+    return !!target.closest(EXTENSION_UI_SELECTOR);
+  }
+
+  private suppressOverlayVisibility(): void {
+    if (this.lastMode !== 'overlay') return;
+    if (this.overlayMarks.length === 0) return;
+    this.overlaySuppressed = true;
+    if (this.overlayRoot) {
+      this.overlayRoot.hidden = true;
+    }
+    closeCard();
+  }
+
+  private restoreOverlayVisibility(): void {
+    if (!this.overlaySuppressed) return;
+    this.overlaySuppressed = false;
+
+    if (this.lastMode !== 'overlay' || this.lastIssues.length === 0) {
+      if (this.overlayRoot) this.overlayRoot.hidden = false;
+      return;
+    }
+
+    this.renderOverlayAnnotations(this.getVisibleIssues(this.lastIssues), false);
+  }
+
+  private collectDomRangeRects(
+    textNodes: { node: Text; start: number; end: number }[],
+    startOffset: number,
+    endOffset: number,
+  ): DOMRect[] {
+    const start = this.resolveOffsetToDomPoint(startOffset, textNodes);
+    const end = this.resolveOffsetToDomPoint(endOffset, textNodes);
+    const range = document.createRange();
+
+    try {
+      range.setStart(start.node, start.offset);
+      range.setEnd(end.node, end.offset);
+    } catch {
+      return [];
+    }
+
+    return Array.from(range.getClientRects())
+      .filter((rect) => rect.width > 0 && rect.height > 0);
   }
 
   private createOverlayMark(issue: Issue, rect: DOMRect | { left: number; top: number; width: number; height: number; bottom: number }): HTMLElement {
@@ -802,6 +952,8 @@ export class AnnotationManager {
     this.overlayTracking = true;
     window.addEventListener('resize', this.handleOverlayViewportChange);
     document.addEventListener('scroll', this.handleOverlayViewportChange, true);
+    document.addEventListener('pointerdown', this.handleDocumentPointerDown, true);
+    document.addEventListener('focusin', this.handleDocumentFocusIn, true);
   }
 
   private stopOverlayTracking(): void {
@@ -809,13 +961,17 @@ export class AnnotationManager {
     this.overlayTracking = false;
     window.removeEventListener('resize', this.handleOverlayViewportChange);
     document.removeEventListener('scroll', this.handleOverlayViewportChange, true);
+    document.removeEventListener('pointerdown', this.handleDocumentPointerDown, true);
+    document.removeEventListener('focusin', this.handleDocumentFocusIn, true);
   }
 }
 
 function getAnnotationElementLogData(element: HTMLElement): Record<string, unknown> {
   return {
     descriptor: element.id ? `${element.tagName.toLowerCase()}#${element.id}` : element.tagName.toLowerCase(),
-    textLength: (element.innerText || element.textContent || '').length,
+    textLength: isGoogleDocsSurfaceRoot(element)
+      ? extractGoogleDocsRenderedText(element).length
+      : (element.innerText || element.textContent || '').length,
   };
 }
 

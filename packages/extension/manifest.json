@@ -20,6 +20,14 @@
   },
   "content_scripts": [
     {
+      "matches": ["https://docs.google.com/*"],
+      "js": ["google-docs-bootstrap.js"],
+      "run_at": "document_start",
+      "all_frames": true,
+      "match_about_blank": true,
+      "world": "MAIN"
+    },
+    {
       "matches": ["<all_urls>"],
       "js": ["content.js"],
       "css": ["annotations.css"]

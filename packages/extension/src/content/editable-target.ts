@@ -1,9 +1,19 @@
 import { extractText } from './text-extractor.js';
+import {
+  findGoogleDocsSurfaceRoot,
+  hasGoogleDocsCoordinateSurface,
+  isGoogleDocsHost,
+  isGoogleDocsSurfaceRoot,
+} from './google-docs-surface.js';
+import { replaceGoogleDocsText } from './google-docs-write.js';
 import type {
   EditableHistoryIdentity,
   EditableHistoryIdentitySignals,
 } from './version-history-core.js';
-import { getTextareaForMirror } from './textarea-mirror.js';
+import {
+  getMirrorForTextarea,
+  getTextareaForMirror,
+} from './textarea-mirror.js';
 
 export type HistoryEditableKind = 'textarea' | 'contenteditable';
 
@@ -35,10 +45,12 @@ export interface EditableTarget {
 
 export const CONTENTEDITABLE_SELECTOR = '[contenteditable]';
 const HISTORY_STORAGE_PREFIX = 'stet:history:';
+const GOOGLE_DOCS_EVENT_TARGET_SELECTOR = 'iframe.docs-texteventtarget-iframe, .docs-texteventtarget-iframe';
 
 interface HostEditableAdapter {
   read(): string;
   write(text: string): void;
+  replaceRange?(start: number, end: number, replacement: string): boolean;
   supportsRangeReplace: boolean;
 }
 
@@ -49,20 +61,42 @@ export interface AnnotationSupport {
   reason: string;
 }
 
-interface BTEditorHostApi {
+interface HostEditorBridge {
+  element?: HTMLElement | null;
   contentEl?: HTMLElement | null;
+  editorEl?: HTMLElement | null;
+  rootEl?: HTMLElement | null;
   getText?: () => string;
+  read?: () => string;
+  readText?: () => string;
+  getValue?: () => string;
   setText?: (text: string) => void;
+  write?: (text: string) => void;
+  writeText?: (text: string) => void;
+  setValue?: (text: string) => void;
+  replaceRange?: (start: number, end: number, replacement: string) => boolean | void;
+  supportsRangeReplace?: boolean;
 }
 
 declare global {
   interface Window {
-    btEditor?: BTEditorHostApi;
+    btAiEditor?: HostEditorBridge;
+    btAiEditors?: HostEditorBridge[] | Record<string, HostEditorBridge> | null;
+    btEditor?: HostEditorBridge;
+    btEditors?: HostEditorBridge[] | Record<string, HostEditorBridge> | null;
+    __BT_AI_EDITORS__?: HostEditorBridge[] | Map<unknown, HostEditorBridge> | Set<HostEditorBridge> | Record<string, HostEditorBridge> | null;
+    __BT_EDITORS__?: HostEditorBridge[] | Map<unknown, HostEditorBridge> | Set<HostEditorBridge> | Record<string, HostEditorBridge> | null;
+    __STET_HOST_EDITORS__?: HostEditorBridge[] | Map<unknown, HostEditorBridge> | Set<HostEditorBridge> | Record<string, HostEditorBridge> | null;
+    __stetHostEditors__?: HostEditorBridge[] | Map<unknown, HostEditorBridge> | Set<HostEditorBridge> | Record<string, HostEditorBridge> | null;
   }
 }
 
 export function isAnnotatableEditable(element: HTMLElement): boolean {
-  return isTopLevelContentEditable(element);
+  return (
+    isTopLevelContentEditable(element) ||
+    isGoogleDocsEditableRoot(element) ||
+    hasRegisteredHostEditable(element)
+  );
 }
 
 export function getAnnotationSupport(element: HTMLElement): AnnotationSupport {
@@ -73,6 +107,24 @@ export function getAnnotationSupport(element: HTMLElement): AnnotationSupport {
     };
   }
 
+  if (isGoogleDocsEditableRoot(element)) {
+    if (!hasGoogleDocsCoordinateSurface(element)) {
+      return {
+        mode: 'panel',
+        reason: 'google-docs-text-only',
+      };
+    }
+
+    return {
+      mode: 'overlay',
+      reason: 'google-docs-rendered-surface',
+    };
+  }
+
+  if (hasRegisteredHostEditable(element)) {
+    return { mode: 'overlay', reason: 'host-managed-editor' };
+  }
+
   if (!hasEnabledContentEditable(element)) {
     return {
       mode: 'panel',
@@ -80,10 +132,11 @@ export function getAnnotationSupport(element: HTMLElement): AnnotationSupport {
     };
   }
 
-  // Always use inline stet-mark annotations for contenteditable elements.
-  // Marks may be destroyed by host editor re-renders (e.g. BTEditor
-  // _renderHighlights) but the checker will recreate them on the next cycle.
-  return { mode: 'inline', reason: 'contenteditable' };
+  if (hasSafeInlineAnnotationMarkup(element) && !hasHostManagedEditorMarker(element)) {
+    return { mode: 'inline', reason: 'safe-rich-text-dom' };
+  }
+
+  return { mode: 'overlay', reason: 'host-managed-editor' };
 }
 
 export function supportsInlineAnnotationMarkup(element: HTMLElement): boolean {
@@ -92,6 +145,12 @@ export function supportsInlineAnnotationMarkup(element: HTMLElement): boolean {
 
 export function findAnnotatableEditable(start: EventTarget | null): HTMLElement | null {
   if (!(start instanceof HTMLElement)) return null;
+  const googleDocsEditable = findGoogleDocsEditable(start);
+  if (googleDocsEditable) return googleDocsEditable;
+
+  const hostEditable = findRegisteredHostEditable(start);
+  if (hostEditable) return hostEditable;
+
   const editable = findTopLevelContentEditable(start);
   return editable && isAnnotatableEditable(editable) ? editable : null;
 }
@@ -99,6 +158,16 @@ export function findAnnotatableEditable(start: EventTarget | null): HTMLElement 
 export function findHistoryEditable(start: EventTarget | null): HTMLElement | null {
   const startElement = toHistoryElement(start);
   if (!startElement) return null;
+
+  const googleDocsEditable = findGoogleDocsEditable(startElement);
+  if (googleDocsEditable) return googleDocsEditable;
+
+  const hostEditable = findRegisteredHostEditable(startElement);
+  if (hostEditable) return hostEditable;
+
+  if (isGoogleDocsHost(startElement.ownerDocument ?? document) && findGoogleDocsSurfaceRoot(startElement.ownerDocument ?? document)) {
+    return null;
+  }
 
   return (
     findDirectHistoryEditable(startElement) ??
@@ -113,14 +182,21 @@ export function discoverAnnotatableEditables(root: ParentNode = document): HTMLE
 }
 
 export function discoverHistoryEditables(root: ParentNode = document): HTMLElement[] {
-  return discoverEditables(root).filter((element) => {
-    if (element instanceof HTMLTextAreaElement) return isHistoryTextarea(element);
-    return isTopLevelContentEditable(element);
-  });
+  const googleDocsRoot = findGoogleDocsSurfaceRoot(root);
+  if (googleDocsRoot) return [googleDocsRoot];
+
+  return discoverEditables(root).filter((element) => getEditableKind(element) !== null);
 }
 
 export function getEditableTarget(element: HTMLElement): EditableTarget | null {
   if (!(element instanceof HTMLElement)) return null;
+
+  if (element instanceof HTMLTextAreaElement) {
+    const textareaMirror = getMirrorForTextarea(element) ?? findMirrorSiblingForTextarea(element);
+    if (textareaMirror) {
+      return buildMirrorEditableTarget(textareaMirror, element);
+    }
+  }
 
   // If the element is a textarea mirror, build identity from the original
   // textarea (for stable field keys) but read/write through the mirror.
@@ -296,6 +372,9 @@ export function replaceEditableRange(
   replacement: string,
 ): boolean {
   const hostAdapter = getHostEditableAdapter(element);
+  if (hostAdapter?.replaceRange) {
+    return hostAdapter.replaceRange(start, end, replacement);
+  }
   if (hostAdapter && !hostAdapter.supportsRangeReplace) return false;
 
   if (element instanceof HTMLTextAreaElement || element instanceof HTMLInputElement) {
@@ -401,18 +480,33 @@ function dispatchEditableEvents(element: HTMLElement) {
 }
 
 function getHostEditableAdapter(element: HTMLElement): HostEditableAdapter | null {
-  const btEditor = window.btEditor;
-  if (!btEditor || typeof btEditor !== 'object') return null;
-  if (btEditor.contentEl !== element) return null;
-  if (typeof btEditor.getText !== 'function' || typeof btEditor.setText !== 'function') return null;
+  if (isGoogleDocsEditableRoot(element)) {
+    return {
+      read: () => extractText(element),
+      write: (text: string) => {
+        if (replaceGoogleDocsText(element, text)) {
+          dispatchEditableEvents(element);
+        }
+      },
+      supportsRangeReplace: false,
+    };
+  }
+
+  const hostEditor = findRegisteredHostEditorBridge(element);
+  if (!hostEditor) return null;
+
+  const read = resolveHostEditorRead(hostEditor);
+  const write = resolveHostEditorWrite(hostEditor);
+  if (!read || !write) return null;
 
   return {
-    read: () => btEditor.getText!(),
+    read,
     write: (text: string) => {
-      btEditor.setText!(text);
+      write(text);
       dispatchEditableEvents(element);
     },
-    supportsRangeReplace: false,
+    replaceRange: resolveHostEditorRangeReplace(hostEditor, element),
+    supportsRangeReplace: resolveHostEditorSupportsRangeReplace(hostEditor),
   };
 }
 
@@ -512,12 +606,21 @@ function toHistoryElement(start: EventTarget | null): HTMLElement | null {
 
 function findDirectHistoryEditable(start: HTMLElement): HTMLElement | null {
   const directTextarea = start instanceof HTMLTextAreaElement ? start : null;
-  if (directTextarea && isHistoryTextarea(directTextarea)) return directTextarea;
+  if (directTextarea) {
+    const directMirror = getMirrorForTextarea(directTextarea) ?? findMirrorSiblingForTextarea(directTextarea);
+    if (directMirror) return directMirror;
+    if (isHistoryTextarea(directTextarea)) return directTextarea;
+  }
 
   const textarea = start.closest('textarea');
-  if (textarea instanceof HTMLTextAreaElement && isHistoryTextarea(textarea)) {
-    return textarea;
+  if (textarea instanceof HTMLTextAreaElement) {
+    const textareaMirror = getMirrorForTextarea(textarea) ?? findMirrorSiblingForTextarea(textarea);
+    if (textareaMirror) return textareaMirror;
+    if (isHistoryTextarea(textarea)) return textarea;
   }
+
+  const hostEditable = findRegisteredHostEditable(start);
+  if (hostEditable) return hostEditable;
 
   const editable = findTopLevelContentEditable(start);
   return editable && isTopLevelContentEditable(editable) ? editable : null;
@@ -619,6 +722,10 @@ function discoverEditables(root: ParentNode): HTMLElement[] {
     discovered.add(root);
   }
 
+  discoverRegisteredHostEditables(root).forEach((element) => {
+    if (getEditableKind(element)) discovered.add(element);
+  });
+
   if (!('querySelectorAll' in root)) return [...discovered];
 
   const nodes = root.querySelectorAll<HTMLElement>(`textarea, ${CONTENTEDITABLE_SELECTOR}`);
@@ -630,7 +737,12 @@ function discoverEditables(root: ParentNode): HTMLElement[] {
 }
 
 function getEditableKind(element: HTMLElement): HistoryEditableKind | null {
-  if (element instanceof HTMLTextAreaElement && isHistoryTextarea(element)) return 'textarea';
+  if (element instanceof HTMLTextAreaElement) {
+    if (getMirrorForTextarea(element) ?? findMirrorSiblingForTextarea(element)) return 'textarea';
+    if (isHistoryTextarea(element)) return 'textarea';
+  }
+  if (isGoogleDocsEditableRoot(element)) return 'contenteditable';
+  if (hasRegisteredHostEditable(element)) return 'contenteditable';
   if (isTopLevelContentEditable(element)) return 'contenteditable';
   return null;
 }
@@ -739,6 +851,11 @@ function buildDescriptorSegment(element: HTMLElement): string {
 }
 
 function getEditableLabel(element: HTMLElement): string {
+  if (isGoogleDocsEditableRoot(element)) {
+    const title = document.title.replace(/\s*-\s*Google Docs\s*$/i, '').trim();
+    return title || 'Google Docs document';
+  }
+
   const labelText = getAssociatedLabelText(element);
   if (labelText) return labelText;
 
@@ -776,6 +893,209 @@ function sanitizeSegment(value: string): string {
 
 function collapseWhitespace(value: string): string {
   return value.replace(/\s+/g, ' ').trim();
+}
+
+function findMirrorSiblingForTextarea(textarea: HTMLTextAreaElement): HTMLElement | null {
+  const next = textarea.nextElementSibling;
+  if (next instanceof HTMLElement && next.dataset.stetTextareaMirror === 'true') {
+    return next;
+  }
+
+  const previous = textarea.previousElementSibling;
+  if (previous instanceof HTMLElement && previous.dataset.stetTextareaMirror === 'true') {
+    return previous;
+  }
+
+  return null;
+}
+
+function findGoogleDocsEditable(start: HTMLElement): HTMLElement | null {
+  if (!isGoogleDocsHost(start.ownerDocument ?? document)) return null;
+
+  const root = findGoogleDocsSurfaceRoot(start.ownerDocument ?? document);
+  if (!root) return null;
+
+  if (root === start || root.contains(start)) return root;
+  if (start.matches(GOOGLE_DOCS_EVENT_TARGET_SELECTOR)) return root;
+  if (start.closest(GOOGLE_DOCS_EVENT_TARGET_SELECTOR)) return root;
+
+  return null;
+}
+
+export function isGoogleDocsEditableRoot(element: HTMLElement): boolean {
+  const root = findGoogleDocsSurfaceRoot(element.ownerDocument ?? document);
+  return root === element && isGoogleDocsSurfaceRoot(element);
+}
+
+function hasRegisteredHostEditable(element: HTMLElement): boolean {
+  return findRegisteredHostEditorBridge(element) !== null;
+}
+
+function findRegisteredHostEditable(start: HTMLElement): HTMLElement | null {
+  let bestMatch: { element: HTMLElement; score: number } | null = null;
+
+  for (const element of collectRegisteredHostEditableElements(start.ownerDocument ?? document)) {
+    let score = -1;
+
+    if (element === start) {
+      score = 1000;
+    } else if (element.contains(start)) {
+      score = 900 - countAncestorDistance(start, element);
+    } else if (start.contains(element)) {
+      score = 700 - countAncestorDistance(element, start);
+    }
+
+    if (score < 0) continue;
+    if (!bestMatch || score > bestMatch.score) {
+      bestMatch = { element, score };
+    }
+  }
+
+  return bestMatch?.element ?? null;
+}
+
+function findRegisteredHostEditorBridge(element: HTMLElement): HostEditorBridge | null {
+  for (const bridge of collectHostEditorBridges(window)) {
+    const root = resolveHostEditorElement(bridge);
+    if (root === element) return bridge;
+  }
+
+  return null;
+}
+
+function discoverRegisteredHostEditables(root: ParentNode): HTMLElement[] {
+  return collectRegisteredHostEditableElements(root)
+    .filter((element) => isVisibleEditableRegion(element, { minWidth: 40, minHeight: 18 }));
+}
+
+function collectRegisteredHostEditableElements(root: ParentNode): HTMLElement[] {
+  const elements = new Set<HTMLElement>();
+
+  for (const bridge of collectHostEditorBridges(window)) {
+    const element = resolveHostEditorElement(bridge);
+    if (!element) continue;
+    if (!belongsToRoot(root, element)) continue;
+    elements.add(element);
+  }
+
+  return [...elements];
+}
+
+function collectHostEditorBridges(win: Window): HostEditorBridge[] {
+  const seen = new Set<HostEditorBridge>();
+  const collected: HostEditorBridge[] = [];
+  const sources = [
+    win.btEditor,
+    win.btEditors,
+    win.btAiEditor,
+    win.btAiEditors,
+    win.__BT_EDITORS__,
+    win.__BT_AI_EDITORS__,
+    win.__stetHostEditors__,
+    win.__STET_HOST_EDITORS__,
+  ];
+
+  sources
+    .flatMap((source) => normalizeHostEditorSource(source))
+    .forEach((bridge) => {
+      if (seen.has(bridge)) return;
+      seen.add(bridge);
+      collected.push(bridge);
+    });
+
+  return collected;
+}
+
+function normalizeHostEditorSource(source: unknown): HostEditorBridge[] {
+  if (!source || typeof source !== 'object') return [];
+
+  if (isHostEditorBridge(source)) {
+    return [source];
+  }
+
+  if (Array.isArray(source)) {
+    return source.filter(isHostEditorBridge);
+  }
+
+  if (source instanceof Map) {
+    return [...source.values()].filter(isHostEditorBridge);
+  }
+
+  if (source instanceof Set) {
+    return [...source].filter(isHostEditorBridge);
+  }
+
+  return Object.values(source).filter(isHostEditorBridge);
+}
+
+function isHostEditorBridge(value: unknown): value is HostEditorBridge {
+  if (!value || typeof value !== 'object') return false;
+
+  return Boolean(
+    resolveHostEditorElement(value as HostEditorBridge) ||
+    resolveHostEditorRead(value as HostEditorBridge) ||
+    resolveHostEditorWrite(value as HostEditorBridge) ||
+    typeof (value as HostEditorBridge).replaceRange === 'function',
+  );
+}
+
+function resolveHostEditorElement(bridge: HostEditorBridge): HTMLElement | null {
+  const element = bridge.contentEl ?? bridge.element ?? bridge.editorEl ?? bridge.rootEl;
+  return element instanceof HTMLElement ? element : null;
+}
+
+function resolveHostEditorRead(bridge: HostEditorBridge): (() => string) | null {
+  if (typeof bridge.getText === 'function') return bridge.getText.bind(bridge);
+  if (typeof bridge.readText === 'function') return bridge.readText.bind(bridge);
+  if (typeof bridge.read === 'function') return bridge.read.bind(bridge);
+  if (typeof bridge.getValue === 'function') return bridge.getValue.bind(bridge);
+  return null;
+}
+
+function resolveHostEditorWrite(bridge: HostEditorBridge): ((text: string) => void) | null {
+  if (typeof bridge.setText === 'function') return bridge.setText.bind(bridge);
+  if (typeof bridge.writeText === 'function') return bridge.writeText.bind(bridge);
+  if (typeof bridge.write === 'function') return bridge.write.bind(bridge);
+  if (typeof bridge.setValue === 'function') return bridge.setValue.bind(bridge);
+  return null;
+}
+
+function resolveHostEditorRangeReplace(
+  bridge: HostEditorBridge,
+  element: HTMLElement,
+): ((start: number, end: number, replacement: string) => boolean) | undefined {
+  if (typeof bridge.replaceRange !== 'function') return undefined;
+
+  return (start, end, replacement) => {
+    const result = bridge.replaceRange!(start, end, replacement);
+    if (result === false) return false;
+    dispatchEditableEvents(element);
+    return true;
+  };
+}
+
+function resolveHostEditorSupportsRangeReplace(bridge: HostEditorBridge): boolean {
+  return bridge.supportsRangeReplace === true || typeof bridge.replaceRange === 'function';
+}
+
+function belongsToRoot(root: ParentNode, element: HTMLElement): boolean {
+  if (root === document) return true;
+  if (root instanceof HTMLElement) {
+    return root === element || root.contains(element);
+  }
+  return true;
+}
+
+function countAncestorDistance(descendant: HTMLElement, ancestor: HTMLElement): number {
+  let distance = 0;
+  let node: HTMLElement | null = descendant;
+
+  while (node && node !== ancestor) {
+    node = node.parentElement;
+    distance += 1;
+  }
+
+  return distance;
 }
 
 function normalizeIdentitySignals(

@@ -14,10 +14,15 @@ import { extractText } from './text-extractor.js';
 import { AnnotationManager, isCardOpen } from './annotation-manager.js';
 import { loadDictionary, loadCustomTerms } from './dictionary-loader.js';
 import {
+  applyGoogleDocsReplacement,
+  rememberGoogleDocsCaret,
+} from './google-docs-write.js';
+import {
   discoverHistoryEditables,
   findHistoryEditable,
   getAnnotationSupport,
   getEditableTarget,
+  isGoogleDocsEditableRoot,
   notifyEditableChanged,
   readEditableText,
   replaceEditableRange,
@@ -67,6 +72,7 @@ let historyFeatureEnabled = true;
 const CHECKER_MARK_SELECTOR = 'stet-mark';
 const INPUT_MUTATION_SUPPRESS_MS = 750;
 const recentInputAt = new WeakMap<HTMLElement, number>();
+const DISCOVERY_ATTRIBUTE_FILTER = ['style', 'class', 'hidden', 'aria-hidden', 'contenteditable', 'role'];
 // let issuePanel: IssuePanelManager | null = null;
 
 interface PopupIssueRecord {
@@ -313,6 +319,9 @@ function runCheckAndAnnotate(element: HTMLElement) {
 
   const startedAt = getNow();
   const text = readEditableText(element);
+  if (isGoogleDocsEditableRoot(element)) {
+    void rememberGoogleDocsCaret(element, text);
+  }
   const mgr = getOrCreateManager(element);
   const beforeMarks = mgr?.getRenderedMarkCount()
     ?? (element.isContentEditable ? element.querySelectorAll(CHECKER_MARK_SELECTOR).length : 0);
@@ -415,17 +424,68 @@ function scheduleInitialCheck(element: HTMLElement, delay = 300) {
   timers.set(element, timer);
 }
 
+function cleanupTrackedEditable(element: HTMLElement) {
+  managers.get(element)?.destroy();
+  managers.delete(element);
+  trackedEditables.delete(element);
+  latestIssues.delete(element);
+  // getIssuePanel().removeElement(element);
+  const timer = timers.get(element);
+  if (timer) clearTimeout(timer);
+  timers.delete(element);
+}
+
+function getResolvedEditableElement(element: HTMLElement): HTMLElement | null {
+  if (element instanceof HTMLTextAreaElement) {
+    const target = getEditableTarget(element);
+    if (target) return target.element;
+
+    const mirror = mirrorTextarea(element);
+    if (mirror) return mirror;
+  }
+
+  return element;
+}
+
+function collectLiveEditableFieldKeys(root: ParentNode = document): Set<string> {
+  const fieldKeys = new Set<string>();
+
+  for (const element of discoverHistoryEditables(root)) {
+    const resolved = getResolvedEditableElement(element);
+    const target = resolved ? getEditableTarget(resolved) : null;
+    if (!target) continue;
+    fieldKeys.add(target.fieldKey);
+  }
+
+  return fieldKeys;
+}
+
+function pruneInactiveTrackedEditables() {
+  const liveFieldKeys = collectLiveEditableFieldKeys();
+
+  for (const element of trackedEditables) {
+    const target = getEditableTarget(element);
+    const isLive = element.isConnected && Boolean(target?.fieldKey && liveFieldKeys.has(target.fieldKey));
+    if (isLive) continue;
+    cleanupTrackedEditable(element);
+  }
+
+  if (activeElement && !trackedEditables.has(activeElement)) {
+    activeElement = null;
+  }
+
+  if (lastHistoryElement) {
+    const target = getEditableTarget(lastHistoryElement);
+    if (!lastHistoryElement.isConnected || !target?.fieldKey || !liveFieldKeys.has(target.fieldKey)) {
+      lastHistoryElement = null;
+    }
+  }
+}
+
 function pruneDisconnectedElements() {
   for (const element of trackedEditables) {
     if (element.isConnected) continue;
-    managers.get(element)?.destroy();
-    managers.delete(element);
-    trackedEditables.delete(element);
-    latestIssues.delete(element);
-    // getIssuePanel().removeElement(element);
-    const timer = timers.get(element);
-    if (timer) clearTimeout(timer);
-    timers.delete(element);
+    cleanupTrackedEditable(element);
   }
 
   if (activeElement && !activeElement.isConnected) {
@@ -439,6 +499,7 @@ function pruneDisconnectedElements() {
 
 function getPageIssueCount(): number {
   pruneDisconnectedElements();
+  pruneInactiveTrackedEditables();
 
   let total = 0;
   for (const [element, issues] of latestIssues) {
@@ -461,6 +522,7 @@ function syncPageState() {
 
 function getEditorCount(): number {
   pruneDisconnectedElements();
+  pruneInactiveTrackedEditables();
 
   let total = 0;
   for (const element of trackedEditables) {
@@ -551,6 +613,7 @@ function getTrackedHistoryElement(): HTMLElement | null {
 
 function getPreferredPopupElement(): HTMLElement | null {
   pruneDisconnectedElements();
+  pruneInactiveTrackedEditables();
 
   const activeCheckElement = getActiveCheckElement();
   if (activeCheckElement) return activeCheckElement;
@@ -598,6 +661,7 @@ async function applySelectedFixes(element: HTMLElement, selectedIssueKeys: strin
   const issues = latestIssues.get(element) ?? [];
   if (issues.length === 0) return 0;
   const target = getEditableTarget(element);
+  const isGoogleDocs = isGoogleDocsEditableRoot(element);
 
   let text = readEditableText(element);
   let applied = 0;
@@ -615,17 +679,31 @@ async function applySelectedFixes(element: HTMLElement, selectedIssueKeys: strin
     if (!range) continue;
     if (range.end > nextLockedStart) continue;
     const replacement = getReplacementText(text, range.start, issue.originalText, issue.suggestion!);
+    const nextText = `${text.slice(0, range.start)}${replacement}${text.slice(range.end)}`;
 
-    if (element.isContentEditable) {
-      const replaced = replaceEditableRange(element, range.start, range.end, replacement);
-      if (!replaced) {
+    if (!usedFullReplacement) {
+      if (isGoogleDocs) {
+        const replaced = await applyGoogleDocsReplacement(
+          element,
+          range.start,
+          range.end,
+          replacement,
+          text,
+        );
+        if (!replaced) {
+          usedFullReplacement = true;
+        }
+      } else if (element.isContentEditable) {
+        const replaced = replaceEditableRange(element, range.start, range.end, replacement);
+        if (!replaced) {
+          usedFullReplacement = true;
+        }
+      } else {
         usedFullReplacement = true;
       }
-    } else {
-      usedFullReplacement = true;
     }
 
-    text = `${text.slice(0, range.start)}${replacement}${text.slice(range.end)}`;
+    text = usedFullReplacement || isGoogleDocs ? nextText : readEditableText(element);
     nextLockedStart = range.start;
     applied += 1;
   }
@@ -818,6 +896,7 @@ async function restoreEditorSnapshot(
 
 function findElementByFieldKey(fieldKey: string): HTMLElement | null {
   pruneDisconnectedElements();
+  pruneInactiveTrackedEditables();
 
   const activeHistoryElement = getTrackedHistoryElement();
   if (activeHistoryElement && getEditableFieldKey(activeHistoryElement) === fieldKey) {
@@ -849,6 +928,42 @@ function registerHistoryTracking() {
 
   document.addEventListener('input', (event) => {
     if (rememberHistoryElement(event.target)) {
+      syncPageState();
+    }
+  }, true);
+}
+
+function getTrackableEditable(start: EventTarget | null): HTMLElement | null {
+  const editable = findHistoryEditable(start);
+  if (!editable?.isConnected) return null;
+  return getResolvedEditableElement(editable);
+}
+
+function registerLateEditableDiscovery() {
+  document.addEventListener('focusin', (event) => {
+    const editable = getTrackableEditable(event.target);
+    if (!editable) return;
+
+    const wasTracked = trackedEditables.has(editable);
+    attachListener(editable);
+
+    if (!wasTracked) {
+      activeElement = editable;
+      syncPageState();
+    }
+  }, true);
+
+  document.addEventListener('input', (event) => {
+    const editable = getTrackableEditable(event.target);
+    if (!editable) return;
+
+    const wasTracked = trackedEditables.has(editable);
+    attachListener(editable);
+
+    if (!wasTracked) {
+      activeElement = editable;
+      recentInputAt.set(editable, getNow());
+      scheduleCheck(editable);
       syncPageState();
     }
   }, true);
@@ -955,12 +1070,10 @@ function registerRuntimeHandlers() {
 
 function refreshAllChecks() {
   pruneDisconnectedElements();
+  pruneInactiveTrackedEditables();
   for (const element of discoverHistoryEditables()) {
-    let target: HTMLElement = element;
-    if (element instanceof HTMLTextAreaElement) {
-      const mirror = mirrorTextarea(element);
-      if (mirror) target = mirror;
-    }
+    const target = getResolvedEditableElement(element);
+    if (!target) continue;
     attachListener(target);
     runCheckAndAnnotate(target);
   }
@@ -986,7 +1099,7 @@ function attachListener(el: HTMLElement) {
   trackedEditables.add(el);
   // Disable browser spellcheck — stet handles it
   el.spellcheck = false;
-  if (el.isContentEditable) {
+  if (getAnnotationSupport(el).mode !== 'panel') {
     managers.set(el, createAnnotationManager(el));
   }
   logHistoryEvent('checker:attach', getCheckerElementLogData(el));
@@ -994,14 +1107,24 @@ function attachListener(el: HTMLElement) {
   el.addEventListener('input', () => {
     if (selfMutating) return;
     recentInputAt.set(el, getNow());
+    clearVisibleIssuesForPendingEdit(el);
     recordHistoryEventRate('checker:input', getCheckerElementLogData(el));
     scheduleCheck(el);
   });
 
   el.addEventListener('focus', () => {
     activeElement = el;
+    if (isGoogleDocsEditableRoot(el)) {
+      void rememberGoogleDocsCaret(el);
+    }
     logHistoryEvent('checker:focus', getCheckerElementLogData(el));
     syncPageState();
+  });
+
+  el.addEventListener('mouseup', () => {
+    if (isGoogleDocsEditableRoot(el)) {
+      void rememberGoogleDocsCaret(el);
+    }
   });
 
   scheduleInitialCheck(el);
@@ -1022,7 +1145,7 @@ function createAnnotationManager(element: HTMLElement): AnnotationManager {
 }
 
 function getOrCreateManager(element: HTMLElement): AnnotationManager | null {
-  if (!element.isContentEditable) return null;
+  if (getAnnotationSupport(element).mode === 'panel') return null;
 
   let mgr = managers.get(element);
   if (!mgr) {
@@ -1034,17 +1157,12 @@ function getOrCreateManager(element: HTMLElement): AnnotationManager | null {
 
 function discoverEditables() {
   pruneDisconnectedElements();
+  pruneInactiveTrackedEditables();
   const editables = discoverHistoryEditables();
   const resolved: HTMLElement[] = [];
   for (const el of editables) {
-    if (el instanceof HTMLTextAreaElement) {
-      const mirror = mirrorTextarea(el);
-      if (mirror) {
-        resolved.push(mirror);
-        continue;
-      }
-    }
-    resolved.push(el);
+    const target = getResolvedEditableElement(el);
+    if (target) resolved.push(target);
   }
   resolved.forEach(attachListener);
   logHistoryEvent('checker:discover', {
@@ -1084,24 +1202,57 @@ function isStetOwnedNode(node: Node): boolean {
   return !!el.closest('.stet-overlay-root, .stet-history-root, .stet-card');
 }
 
+function isGoogleDocsChromeNode(node: Node): boolean {
+  const el = node instanceof Element ? node : node.parentElement;
+  if (!el) return false;
+  return !!el.closest('.kix-cursor, .kix-cursor-caret, .kix-selection-overlay');
+}
+
+function shouldIgnoreMutation(mutation: MutationRecord): boolean {
+  if (isStetOwnedNode(mutation.target)) return true;
+
+  const changedNodes = [...mutation.addedNodes, ...mutation.removedNodes];
+  if (changedNodes.length > 0 && changedNodes.every((node) => isGoogleDocsChromeNode(node))) {
+    return true;
+  }
+
+  if (!isGoogleDocsChromeNode(mutation.target)) return false;
+  return changedNodes.every((node) => isGoogleDocsChromeNode(node));
+}
+
 function observeDOM() {
   if (domObserver) return;
 
   domObserver = new MutationObserver((mutations) => {
     if (selfMutating) return;
 
-    // Filter out mutations targeting stet's own DOM to avoid feedback loops
-    const filtered = mutations.filter((m) => !isStetOwnedNode(m.target));
+    // Filter out mutations targeting stet's own DOM and Google Docs cursor
+    // chrome so re-checks only happen on actual content changes.
+    const filtered = mutations.filter((m) => !shouldIgnoreMutation(m));
     if (filtered.length === 0) return;
 
     const trackedBeforePrune = trackedEditables.size;
     pruneDisconnectedElements();
-    const prunedTrackedEditables = trackedEditables.size !== trackedBeforePrune;
     const changedEditables = new Set<HTMLElement>();
 
     for (const mutation of filtered) {
       const mutationEditable = findEditableForNode(mutation.target);
       if (mutationEditable) changedEditables.add(mutationEditable);
+
+      if (mutation.type === 'attributes' && mutation.target instanceof HTMLElement) {
+        const directEditable = getTrackableEditable(mutation.target);
+        if (directEditable) {
+          attachListener(directEditable);
+          changedEditables.add(directEditable);
+        }
+
+        discoverHistoryEditables(mutation.target).forEach((disc) => {
+          const discovered = getResolvedEditableElement(disc);
+          if (!discovered) return;
+          attachListener(discovered);
+          changedEditables.add(discovered);
+        });
+      }
 
       for (const node of mutation.addedNodes) {
         if (isStetOwnedNode(node)) continue;
@@ -1109,24 +1260,20 @@ function observeDOM() {
         if (changedEditable) changedEditables.add(changedEditable);
 
         if (node instanceof HTMLElement) {
-          let editable = findHistoryEditable(node);
-          if (editable instanceof HTMLTextAreaElement) {
-            const m = mirrorTextarea(editable);
-            if (m) editable = m;
-          }
+          const editable = getTrackableEditable(node);
           if (editable) attachListener(editable);
           discoverHistoryEditables(node).forEach((disc) => {
-            let discovered: HTMLElement = disc;
-            if (disc instanceof HTMLTextAreaElement) {
-              const m = mirrorTextarea(disc);
-              if (m) discovered = m;
-            }
+            const discovered = getResolvedEditableElement(disc);
+            if (!discovered) return;
             attachListener(discovered);
             changedEditables.add(discovered);
           });
         }
       }
     }
+
+    pruneInactiveTrackedEditables();
+    const prunedTrackedEditables = trackedEditables.size !== trackedBeforePrune;
 
     changedEditables.forEach((editable) => {
       if (!editable.isConnected) return;
@@ -1151,6 +1298,8 @@ function observeDOM() {
     childList: true,
     subtree: true,
     characterData: true,
+    attributes: true,
+    attributeFilter: DISCOVERY_ATTRIBUTE_FILTER,
   });
 }
 
@@ -1237,6 +1386,7 @@ export async function initChecker(onDictionaryLoaded?: OnDictionaryLoaded) {
 
   discoverEditables();
   observeDOM();
+  registerLateEditableDiscovery();
   registerRuntimeHandlers();
   if (historyFeatureEnabled) {
     registerHistoryTracking();

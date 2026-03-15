@@ -2,6 +2,8 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  discoverAnnotatableEditables,
+  findAnnotatableEditable,
   getEditableTarget,
   replaceEditableRange,
   replaceEditableText,
@@ -27,12 +29,26 @@ function mockRect(element: HTMLElement, width = 320, height = 120) {
 describe('BTEditor host adapter', () => {
   beforeEach(() => {
     document.body.innerHTML = '';
+    delete window.btAiEditor;
+    delete window.btAiEditors;
     delete window.btEditor;
+    delete window.btEditors;
+    delete window.__BT_AI_EDITORS__;
+    delete window.__BT_EDITORS__;
+    delete window.__STET_HOST_EDITORS__;
+    delete window.__stetHostEditors__;
   });
 
   afterEach(() => {
     document.body.innerHTML = '';
+    delete window.btAiEditor;
+    delete window.btAiEditors;
     delete window.btEditor;
+    delete window.btEditors;
+    delete window.__BT_AI_EDITORS__;
+    delete window.__BT_EDITORS__;
+    delete window.__STET_HOST_EDITORS__;
+    delete window.__stetHostEditors__;
     vi.restoreAllMocks();
   });
 
@@ -95,5 +111,72 @@ describe('BTEditor host adapter', () => {
 
     expect(setText).toHaveBeenCalledWith('Gamma beta');
     expect(editor.querySelector('.fig-ref')?.textContent).toBe('Gamma beta');
+  });
+
+  it('discovers and routes BT AI editors registered through a registry object', () => {
+    document.body.innerHTML = `
+      <section id="shell">
+        <div id="rewrite-editor" aria-label="Rewrite Body">
+          <div class="rendered">Rendered rewrite draft</div>
+        </div>
+      </section>
+    `;
+
+    const editor = document.getElementById('rewrite-editor') as HTMLElement;
+    mockRect(editor);
+
+    let plainText = 'Rewrite draft from adapter';
+    const readText = vi.fn(() => plainText);
+    const writeText = vi.fn((text: string) => {
+      plainText = text;
+      editor.querySelector('.rendered')!.textContent = text;
+    });
+
+    window.btEditors = {
+      rewrite: {
+        element: editor,
+        readText,
+        writeText,
+      },
+    };
+
+    expect(findAnnotatableEditable(editor.querySelector('.rendered'))).toBe(editor);
+    expect(discoverAnnotatableEditables()).toContain(editor);
+
+    const target = getEditableTarget(editor);
+
+    expect(target).not.toBeNull();
+    expect(target!.read()).toBe('Rewrite draft from adapter');
+
+    target!.write('Updated rewrite draft');
+
+    expect(writeText).toHaveBeenCalledWith('Updated rewrite draft');
+    expect(editor.querySelector('.rendered')?.textContent).toBe('Updated rewrite draft');
+  });
+
+  it('uses adapter range replacement when a BT AI editor exposes it', () => {
+    document.body.innerHTML = `<div id="headline-editor" aria-label="Headline"></div>`;
+
+    const editor = document.getElementById('headline-editor') as HTMLElement;
+    mockRect(editor, 320, 40);
+
+    let plainText = 'Alpha beta';
+    const replaceRange = vi.fn((start: number, end: number, replacement: string) => {
+      plainText = `${plainText.slice(0, start)}${replacement}${plainText.slice(end)}`;
+      return true;
+    });
+
+    window.__BT_AI_EDITORS__ = [
+      {
+        element: editor,
+        getText: () => plainText,
+        setText: vi.fn(),
+        replaceRange,
+      },
+    ];
+
+    expect(replaceEditableRange(editor, 0, 5, 'Gamma')).toBe(true);
+    expect(replaceRange).toHaveBeenCalledWith(0, 5, 'Gamma');
+    expect(getEditableTarget(editor)?.read()).toBe('Gamma beta');
   });
 });

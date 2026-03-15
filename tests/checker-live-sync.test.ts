@@ -172,4 +172,102 @@ describe('checker live sync', () => {
     expect(settledState.totalIssues).toBe(0);
     expect(settledState.issues).toHaveLength(0);
   });
+
+  it('drops stale page issues when the issue-bearing editor is hidden and another editor stays active', async () => {
+    const { listeners } = createChromeMock();
+    const { initChecker } = await import('../packages/extension/src/content/checker.js');
+
+    document.body.innerHTML = `
+      <div id="issue-editor" contenteditable="true" aria-label="Draft body"></div>
+      <div id="clean-editor" contenteditable="true" aria-label="Additional instructions"></div>
+    `;
+
+    const issueEditor = document.getElementById('issue-editor') as HTMLElement;
+    const cleanEditor = document.getElementById('clean-editor') as HTMLElement;
+    mockRect(issueEditor);
+    mockRect(cleanEditor);
+
+    await initChecker();
+
+    issueEditor.textContent = 'teh draft';
+    issueEditor.dispatchEvent(new FocusEvent('focus', { bubbles: true }));
+    issueEditor.dispatchEvent(new Event('input', { bubbles: true }));
+    await waitForChecks();
+
+    cleanEditor.textContent = 'clean draft';
+    cleanEditor.dispatchEvent(new FocusEvent('focus', { bubbles: true }));
+    cleanEditor.dispatchEvent(new Event('input', { bubbles: true }));
+    await waitForChecks();
+
+    let state = await dispatchRuntimeMessage(listeners[0], { type: 'GET_PAGE_ISSUES' }) as {
+      totalIssues: number;
+      activeLabel: string | null;
+      issues: Array<unknown>;
+    };
+
+    expect(state.totalIssues).toBe(1);
+    expect(state.activeLabel).toBe('Additional instructions');
+    expect(state.issues).toHaveLength(0);
+
+    issueEditor.style.display = 'none';
+    await new Promise((resolve) => setTimeout(resolve, 40));
+
+    state = await dispatchRuntimeMessage(listeners[0], { type: 'GET_PAGE_ISSUES' }) as {
+      totalIssues: number;
+      editorCount: number;
+      activeLabel: string | null;
+      issues: Array<unknown>;
+    };
+
+    expect(state.totalIssues).toBe(0);
+    expect(state.editorCount).toBe(1);
+    expect(state.activeLabel).toBe('Additional instructions');
+    expect(state.issues).toHaveLength(0);
+  });
+
+  it('discovers and checks editors that become visible later', async () => {
+    const { listeners } = createChromeMock();
+    const { initChecker } = await import('../packages/extension/src/content/checker.js');
+
+    document.body.innerHTML = `
+      <div
+        id="revealed-editor"
+        contenteditable="true"
+        aria-label="Generated draft"
+        style="display: none;"
+      >teh draft</div>
+    `;
+
+    const editor = document.getElementById('revealed-editor') as HTMLElement;
+    mockRect(editor);
+
+    await initChecker();
+
+    let state = await dispatchRuntimeMessage(listeners[0], { type: 'GET_PAGE_ISSUES' }) as {
+      totalIssues: number;
+      editorCount: number;
+      issues: Array<unknown>;
+    };
+
+    expect(state.totalIssues).toBe(0);
+    expect(state.editorCount).toBe(0);
+    expect(state.issues).toHaveLength(0);
+
+    editor.style.display = 'block';
+    editor.dispatchEvent(new FocusEvent('focus', { bubbles: true }));
+    editor.dispatchEvent(new Event('input', { bubbles: true }));
+    await waitForChecks();
+
+    state = await dispatchRuntimeMessage(listeners[0], { type: 'GET_PAGE_ISSUES' }) as {
+      totalIssues: number;
+      editorCount: number;
+      activeLabel: string | null;
+      issues: Array<{ rule: string }>;
+    };
+
+    expect(state.totalIssues).toBe(1);
+    expect(state.editorCount).toBe(1);
+    expect(state.activeLabel).toBe('Generated draft');
+    expect(state.issues[0]?.rule).toBe('SPELL');
+  });
 });

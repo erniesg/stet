@@ -22,6 +22,10 @@ function copyExtensionAssets() {
         resolve(__dirname, 'src/content/page-debug-bridge.js'),
         resolve(dist, 'page-debug-bridge.js'),
       );
+      copyFileSync(
+        resolve(__dirname, 'src/content/google-docs-bootstrap.js'),
+        resolve(dist, 'google-docs-bootstrap.js'),
+      );
 
       const iconsDir = resolve(dist, 'assets/icons');
       if (!existsSync(iconsDir)) {
