@@ -10,6 +10,7 @@ stet-mark,
 stet-mark {
   text-decoration-line: underline;
   text-decoration-style: solid;
+  outline: none;
   text-decoration-thickness: 2px;
   text-underline-offset: 3px;
   text-decoration-skip-ink: none;
