@@ -34,4 +34,15 @@ describe('replacement text casing', () => {
 
     expect(next).toBe('AGENCY');
   });
+
+  it('does not capitalize the first letter after leading digits', () => {
+    const next = getReplacementText(
+      '13% of respondents agreed.',
+      0,
+      '13%',
+      '13 per cent',
+    );
+
+    expect(next).toBe('13 per cent');
+  });
 });

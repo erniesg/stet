@@ -28,6 +28,11 @@ function capitalizeFirstLetter(value: string): string {
   if (!match || match.index === undefined) return value;
 
   const index = match.index;
+  const prefix = value.slice(0, index);
+  if (!/^[\s"'([{]*$/.test(prefix)) {
+    return value;
+  }
+
   return `${value.slice(0, index)}${value.charAt(index).toUpperCase()}${value.slice(index + 1)}`;
 }
 
