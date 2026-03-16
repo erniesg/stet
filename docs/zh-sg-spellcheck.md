@@ -21,15 +21,26 @@
 The SG overlay adds terms that were missing from the upstream base list but appear in official Singapore sources:
 
 - `巴士转换站`
+- `巴士车道`
 - `德士`
 - `组屋`
 - `建屋局`
+- `建屋发展局`
+- `预购组屋`
+- `综合公交枢纽`
 
 Reference pages:
 
 - [LTA Community Guide Safe Restart (Chinese PDF)](https://www.lta.gov.sg/content/dam/ltagov/news/press/2020/20200820_Community_Guide_Safe_Restart_Chinese.pdf)
 - [HDB Speaks: Our priorities in 2024 and beyond](https://www.hdb.gov.sg/about-us/news-and-publications/publications/hdbspeaks/our-priorities-in-2024-and-beyond)
 - [HDB annual reports](https://www.hdb.gov.sg/about-us/news-and-publications/publications/annual-report)
+- [Government Terms Translated](https://www.translatedterms.gov.sg/)
+- [Government Terms Translated About](https://www.translatedterms.gov.sg/about)
+
+Notes:
+
+- `Government Terms Translated` is useful for validating official Singapore Chinese terminology.
+- I treated it as a reference source and manually curated a small overlay from confirmed terms instead of bulk-importing the full site dataset.
 
 ## Validation
 
