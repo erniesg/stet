@@ -1317,7 +1317,7 @@ function observeDOM() {
 async function loadSpellCheckDictionary(): Promise<string[]> {
   try {
     const [words, customTerms] = await Promise.all([
-      loadDictionary(),
+      loadDictionary(config?.language ?? 'en-GB'),
       loadCustomTerms(),
     ]);
     return [...words, ...customTerms];

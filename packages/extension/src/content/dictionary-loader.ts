@@ -11,14 +11,20 @@
  * Default points to the stet repo's data directory via jsDelivr CDN.
  */
 
-/** Default fallback dictionary URL — served via jsDelivr with CORS + gzip */
-const DICTIONARY_VERSION = '20260314-merged';
-const DEFAULT_DICTIONARY_URL =
-  `https://cdn.jsdelivr.net/gh/erniesg/stet@main/data/wordlist-en.txt?v=${DICTIONARY_VERSION}`;
+import type { Language } from 'stet';
 
-function getBundledDictionaryUrl(): string | null {
+/** Default fallback dictionary URL — served via jsDelivr with CORS + gzip */
+const DICTIONARY_VERSION = '20260317-zh-sg';
+const DEFAULT_DICTIONARY_BASE_URL = 'https://cdn.jsdelivr.net/gh/erniesg/stet@main/data';
+const DICTIONARY_FILES: Record<Language, string> = {
+  'en-GB': 'wordlist-en.txt',
+  'en-US': 'wordlist-en.txt',
+  'zh-SG': 'wordlist-zh-sg.txt',
+};
+
+function getBundledDictionaryUrl(language: Language): string | null {
   try {
-    return `${chrome.runtime.getURL('wordlist-en.txt')}?v=${DICTIONARY_VERSION}`;
+    return `${chrome.runtime.getURL(getDictionaryFile(language))}?v=${DICTIONARY_VERSION}`;
   } catch {
     return null;
   }
@@ -36,19 +42,21 @@ interface CachedDictionary {
 
 /**
  * Load the dictionary — from cache or CDN.
- * Returns an array of valid English words.
+ * Returns an array of valid words for the configured language.
  */
 export async function loadDictionary(
-  url: string = getBundledDictionaryUrl() ?? DEFAULT_DICTIONARY_URL,
+  language: Language = 'en-GB',
+  url?: string,
 ): Promise<string[]> {
-  const bundledUrl = getBundledDictionaryUrl();
-  const useBundledAsset = bundledUrl !== null && isSameDictionaryUrl(url, bundledUrl);
+  const bundledUrl = getBundledDictionaryUrl(language);
+  const resolvedUrl = url ?? bundledUrl ?? getDefaultDictionaryUrl(language);
+  const useBundledAsset = bundledUrl !== null && isSameDictionaryUrl(resolvedUrl, bundledUrl);
 
   // Always prefer the packaged asset when it exists. It is local to the
   // extension build, so chrome.storage caching only makes it go stale.
   if (useBundledAsset) {
     try {
-      const words = await fetchDictionaryWords(url);
+      const words = await fetchDictionaryWords(resolvedUrl);
       console.log(`[stet] Dictionary loaded from extension bundle (${words.length} words)`);
       return words;
     } catch (err) {
@@ -58,18 +66,18 @@ export async function loadDictionary(
 
   // 1. Try cache for remote dictionaries / fallback path
   const cached = await getCached();
-  if (cached && cached.url === url && (Date.now() - cached.fetchedAt) < CACHE_TTL_MS) {
+  if (cached && cached.url === resolvedUrl && (Date.now() - cached.fetchedAt) < CACHE_TTL_MS) {
     console.log(`[stet] Dictionary loaded from cache (${cached.words.length} words)`);
     return cached.words;
   }
 
   // 2. Fetch remote fallback and cache it
   try {
-    const words = await fetchDictionaryWords(url);
+    const words = await fetchDictionaryWords(resolvedUrl);
     console.log(`[stet] Dictionary fetched (${words.length} words)`);
 
     // 3. Cache
-    await setCached({ words, fetchedAt: Date.now(), url });
+    await setCached({ words, fetchedAt: Date.now(), url: resolvedUrl });
 
     return words;
   } catch (err) {
@@ -87,7 +95,7 @@ export async function loadCustomTerms(): Promise<string[]> {
   return new Promise((resolve) => {
     try {
       chrome.storage.sync.get({ stet_custom_terms: [] as string[] }, (result) => {
-        resolve((result.stet_custom_terms as string[] | undefined) || []);
+        resolve(normalizeCustomTerms((result.stet_custom_terms as string[] | undefined) || []));
       });
     } catch {
       resolve([]);
@@ -113,17 +121,29 @@ function stripQuery(url: string): string {
   return queryIndex === -1 ? url : url.slice(0, queryIndex);
 }
 
+function getDefaultDictionaryUrl(language: Language): string {
+  return `${DEFAULT_DICTIONARY_BASE_URL}/${getDictionaryFile(language)}?v=${DICTIONARY_VERSION}`;
+}
+
+function getDictionaryFile(language: Language): string {
+  return DICTIONARY_FILES[language] ?? DICTIONARY_FILES['en-GB'];
+}
+
 /**
  * Save custom terms to chrome.storage.sync.
  */
 export async function saveCustomTerms(terms: string[]): Promise<void> {
   return new Promise((resolve) => {
     try {
-      chrome.storage.sync.set({ stet_custom_terms: terms }, resolve);
+      chrome.storage.sync.set({ stet_custom_terms: normalizeCustomTerms(terms) }, resolve);
     } catch {
       resolve();
     }
   });
+}
+
+export function normalizeCustomTerms(terms: string[]): string[] {
+  return [...new Set(terms.map(term => term.trim()).filter(Boolean))];
 }
 
 // ---------------------------------------------------------------------------

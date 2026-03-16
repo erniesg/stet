@@ -5,7 +5,7 @@ export type Severity = 'error' | 'warning' | 'info';
 export type SectionContext = 'body' | 'headline' | 'excerpt';
 
 /** Supported languages */
-export type Language = 'en-GB' | 'en-US';
+export type Language = 'en-GB' | 'en-US' | 'zh-SG';
 
 /** A single issue found by a rule */
 export interface Issue {
