@@ -10,6 +10,7 @@ import {
   getHistorySettings,
   DEFAULT_STORED_SETTINGS,
 } from '../storage/settings.js';
+import { getProfile, resetOverridesForProfile } from '../storage/profiles.js';
 
 interface PopupIssueRecord {
   key: string;
@@ -632,6 +633,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ ok: true });
       });
       return true;
+
+    case 'APPLY_PROFILE': {
+      const preset = getProfile(typeof message.profileId === 'string' ? message.profileId : 'standard');
+      loadSettings().then(async ({ userOverrides }) => {
+        await saveSettings({
+          resolvedConfig: preset.resolvedConfig,
+          userOverrides: resetOverridesForProfile(userOverrides),
+        });
+        sendResponse({ ok: true, profileId: preset.id });
+      });
+      return true;
+    }
 
     case 'SYNC_PAGE_ISSUES':
       if (typeof sender.tab?.id === 'number') {

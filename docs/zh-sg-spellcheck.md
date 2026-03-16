@@ -5,6 +5,7 @@
 - `COMMON-SPELL-01` now accepts `language: zh-SG`.
 - The extension bundles `data/wordlist-zh-sg.txt` and loads it automatically when the resolved config language is `zh-SG`.
 - Extension custom spellcheck entries continue to work through `chrome.storage.sync` via the `stet_custom_terms` key.
+- The extension options page now includes a `Zaobao Chinese` profile preset that applies `zh-SG` and limits the common pack to spellcheck.
 
 ## Dictionary provenance
 
@@ -35,7 +36,7 @@ Reference pages:
 Validated in this branch with:
 
 - `npm run build:wordlist:zh-sg`
-- `npm test -- tests/common-language-rules.test.ts tests/engine.test.ts tests/dictionary-loader.test.ts`
+- `npm test -- tests/common-language-rules.test.ts tests/engine.test.ts tests/dictionary-loader.test.ts tests/extension-profiles.test.ts`
 - `npm run lint`
 - `npm test`
 - `npm run build`
