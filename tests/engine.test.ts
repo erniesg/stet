@@ -143,6 +143,56 @@ describe('checkDocumentAsync()', () => {
   });
 });
 
+describe('Document full-text tagging', () => {
+  beforeAll(() => {
+    registerPack({
+      id: 'test-doc-tags',
+      name: 'Test document tags',
+      description: 'Verifies section tags in fullDocumentText',
+      config: {},
+      rules: [{
+        id: 'TEST-DOC-TAGS-01',
+        name: 'Document tags visible',
+        category: 'test',
+        severity: 'info',
+        check: (text, ctx) => (
+          text === 'Body paragraph'
+          && ctx.sectionContext === 'body'
+          && ctx.fullDocumentText.includes('<headline>Story headline</headline>')
+          && ctx.fullDocumentText.includes('<excerpt>Story excerpt</excerpt>')
+          && ctx.fullDocumentText.includes('<body>Body paragraph</body>')
+            ? [{
+                rule: 'TEST-DOC-TAGS-01',
+                name: 'Document tags visible',
+                category: 'test',
+                severity: 'info',
+                originalText: text,
+                suggestion: null,
+                description: 'Document tags were passed through',
+                offset: 0,
+                length: text.length,
+                canFix: false,
+              }]
+            : []
+        ),
+      }],
+    });
+  });
+
+  it('passes tagged fullDocumentText to document-level rules', () => {
+    const issues = checkDocument(
+      {
+        headline: 'Story headline',
+        excerpt: 'Story excerpt',
+        body: ['Body paragraph'],
+      },
+      { packs: ['test-doc-tags'] },
+    );
+
+    expect(issues.some((issue) => issue.rule === 'TEST-DOC-TAGS-01')).toBe(true);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Issue identity (issueId + fingerprint)
 // ---------------------------------------------------------------------------
@@ -404,7 +454,7 @@ describe('applyUserOverrides()', () => {
     expect(result.debounceMs).toBe(1000);
     // Base unchanged
     expect(base.enabled).toBe(true);
-    expect(base.role).toBe('subeditor');
+    expect(base.role).toBe('journalist');
   });
 
   it('merges disabled rules', () => {

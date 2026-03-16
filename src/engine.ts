@@ -376,9 +376,16 @@ export async function checkAsync(text: string, options?: CheckOptions): Promise<
 /** Build full document text from structured sections */
 function buildFullText(doc: DocumentInput): string {
   const parts: string[] = [];
-  if (doc.headline) parts.push(doc.headline);
-  if (doc.excerpt) parts.push(doc.excerpt);
-  parts.push(...doc.body);
+
+  if (doc.headline) {
+    parts.push(`<headline>${doc.headline}</headline>`);
+  }
+
+  if (doc.excerpt) {
+    parts.push(`<excerpt>${doc.excerpt}</excerpt>`);
+  }
+
+  parts.push(`<body>${doc.body.join('\n\n')}</body>`);
   return parts.join('\n\n');
 }
 
