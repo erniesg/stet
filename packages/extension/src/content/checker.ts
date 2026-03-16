@@ -8,7 +8,7 @@
  *   initChecker();
  */
 
-import { check, checkDocument, toCheckOptions, listPacks } from 'stet';
+import { checkDocument, checkDocumentAsync, toCheckOptions, listPacks } from 'stet';
 import type { ResolvedStetConfig, Issue, DocumentIssue } from 'stet';
 import { extractText } from './text-extractor.js';
 import { AnnotationManager, isCardOpen } from './annotation-manager.js';
@@ -72,6 +72,7 @@ let historyFeatureEnabled = true;
 const CHECKER_MARK_SELECTOR = 'stet-mark';
 const INPUT_MUTATION_SUPPRESS_MS = 750;
 const recentInputAt = new WeakMap<HTMLElement, number>();
+const elementCheckVersions = new WeakMap<HTMLElement, number>();
 const DISCOVERY_ATTRIBUTE_FILTER = ['style', 'class', 'hidden', 'aria-hidden', 'contenteditable', 'role'];
 // let issuePanel: IssuePanelManager | null = null;
 
@@ -184,7 +185,86 @@ function extractParagraphs(text: string): { headline?: string; body: string[] } 
   return { body: parts };
 }
 
-function getIssues(element: HTMLElement, text = readEditableText(element)): Issue[] {
+function buildSectionStartMap(fullText: string, headline: string | undefined, body: string[]): Map<string, number> {
+  const sectionStarts = new Map<string, number>();
+  let searchFrom = 0;
+
+  if (headline) {
+    const headlineStart = fullText.indexOf(headline, searchFrom);
+    if (headlineStart >= 0) {
+      sectionStarts.set('headline', headlineStart);
+      searchFrom = headlineStart + headline.length;
+    }
+  }
+
+  for (let i = 0; i < body.length; i++) {
+    const paraStart = fullText.indexOf(body[i], searchFrom);
+    if (paraStart >= 0) {
+      sectionStarts.set(`body:${i}`, paraStart);
+      searchFrom = paraStart + body[i].length;
+    }
+  }
+
+  return sectionStarts;
+}
+
+function flattenDocumentIssues(
+  issues: DocumentIssue[],
+  fullText: string,
+  headline: string | undefined,
+  body: string[],
+): Issue[] {
+  const flatIssues: Issue[] = [];
+  const sectionStarts = buildSectionStartMap(fullText, headline, body);
+
+  for (const issue of issues) {
+    let globalOffset: number;
+
+    if (issue.section === 'headline') {
+      globalOffset = (sectionStarts.get('headline') ?? 0) + issue.offset;
+    } else if (issue.section === 'body' && issue.paragraphIndex !== undefined) {
+      globalOffset = (sectionStarts.get(`body:${issue.paragraphIndex}`) ?? 0) + issue.offset;
+    } else {
+      globalOffset = issue.offset;
+    }
+
+    flatIssues.push({ ...issue, offset: globalOffset });
+  }
+
+  return flatIssues;
+}
+
+function hasAsyncRulesEnabled(): boolean {
+  const activePackIds = new Set(
+    Array.isArray(config?.packs) && config.packs.length > 0
+      ? config.packs
+      : listPacks().map((pack) => pack.id),
+  );
+
+  return listPacks().some((pack) => (
+    activePackIds.has(pack.id) && pack.rules.some((rule) => rule.isAsync)
+  ));
+}
+
+async function fetchFxRateFromBackground(from: string, to: string) {
+  return await new Promise<{ rate: number; source: string; timestamp: string }>((resolve, reject) => {
+    chrome.runtime.sendMessage({ type: 'FETCH_FX_RATE', from, to }, (response) => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
+        return;
+      }
+
+      if (!response?.ok || !response.result) {
+        reject(new Error(typeof response?.error === 'string' ? response.error : 'FX lookup failed'));
+        return;
+      }
+
+      resolve(response.result as { rate: number; source: string; timestamp: string });
+    });
+  });
+}
+
+function getIssues(text: string): Issue[] {
   if (!config || !config.enabled) return [];
   if (!text.trim()) return [];
 
@@ -197,48 +277,28 @@ function getIssues(element: HTMLElement, text = readEditableText(element)): Issu
     { ...opts, onDiagnostic: (d) => console.warn('[stet] Rule error:', d.ruleId, d.error) },
   );
 
-  // Convert DocumentIssue offsets to flat innerText offsets for annotation.
-  // Use indexOf on the original innerText to find each section's true start
-  // position, avoiding drift from trimmed whitespace or variable separators.
-  const fullText = text; // innerText from extractText() above
-  const flatIssues: Issue[] = [];
+  return flattenDocumentIssues(issues, text, headline, body);
+}
 
-  // Build a map of section → start position in fullText
-  const sectionStarts = new Map<string, number>();
-  let searchFrom = 0;
+async function getAsyncIssues(text: string): Promise<Issue[]> {
+  if (!config || !config.enabled) return [];
+  if (!text.trim()) return [];
 
-  if (headline) {
-    const hlStart = fullText.indexOf(headline, searchFrom);
-    if (hlStart >= 0) {
-      sectionStarts.set('headline', hlStart);
-      searchFrom = hlStart + headline.length;
-    }
-  }
+  const { headline, body } = extractParagraphs(text);
+  const opts = toCheckOptions(config);
+  const issues = await checkDocumentAsync(
+    { headline, body },
+    {
+      ...opts,
+      host: {
+        ...opts.host,
+        fetchFxRate: fetchFxRateFromBackground,
+      },
+      onDiagnostic: (d) => console.warn('[stet] Async rule error:', d.ruleId, d.error),
+    },
+  );
 
-  for (let i = 0; i < body.length; i++) {
-    const paraStart = fullText.indexOf(body[i], searchFrom);
-    if (paraStart >= 0) {
-      sectionStarts.set(`body:${i}`, paraStart);
-      searchFrom = paraStart + body[i].length;
-    }
-  }
-
-  for (const issue of issues) {
-    const di = issue as DocumentIssue;
-    let globalOffset: number;
-
-    if (di.section === 'headline') {
-      globalOffset = (sectionStarts.get('headline') ?? 0) + issue.offset;
-    } else if (di.section === 'body' && di.paragraphIndex !== undefined) {
-      globalOffset = (sectionStarts.get(`body:${di.paragraphIndex}`) ?? 0) + issue.offset;
-    } else {
-      globalOffset = issue.offset;
-    }
-
-    flatIssues.push({ ...issue, offset: globalOffset });
-  }
-
-  return flatIssues;
+  return flattenDocumentIssues(issues, text, headline, body);
 }
 
 function getIgnoredIssueKeySet(element: HTMLElement): Set<string> {
@@ -306,6 +366,70 @@ function clearVisibleIssuesForPendingEdit(element: HTMLElement) {
   publishElementIssues(element, []);
 }
 
+function didIssuePayloadChange(previous: Issue[], next: Issue[]): boolean {
+  if (previous.length !== next.length) return true;
+
+  for (let i = 0; i < previous.length; i++) {
+    const left = previous[i];
+    const right = next[i];
+
+    if (
+      left.rule !== right.rule
+      || left.offset !== right.offset
+      || left.length !== right.length
+      || left.originalText !== right.originalText
+      || left.suggestion !== right.suggestion
+      || left.canFix !== right.canFix
+      || left.description !== right.description
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+async function refreshAsyncIssues(element: HTMLElement, text: string, checkVersion: number): Promise<void> {
+  try {
+    const asyncIssues = filterIgnoredIssues(element, await getAsyncIssues(text));
+
+    if (!element.isConnected) return;
+    if (elementCheckVersions.get(element) !== checkVersion) return;
+    if (readEditableText(element) !== text) return;
+
+    const currentIssues = latestIssues.get(element) ?? [];
+    if (!didIssuePayloadChange(currentIssues, asyncIssues)) return;
+
+    rememberElementIssues(element, asyncIssues);
+    syncPageState();
+
+    if (isCardOpen()) return;
+
+    const mgr = getOrCreateManager(element);
+    const annotationSupport = getAnnotationSupport(element);
+    const canRenderAnnotations = annotationSupport.mode !== 'panel';
+    const annotationMode = annotationSupport.mode === 'inline' ? 'inline' : 'overlay';
+
+    selfMutating = true;
+    try {
+      if (canRenderAnnotations && mgr) {
+        mgr.annotate(asyncIssues, annotationMode);
+      } else {
+        mgr?.clear();
+      }
+    } finally {
+      window.setTimeout(() => { selfMutating = false; }, 0);
+    }
+
+    logHistoryEvent('checker:async-refresh', {
+      ...getCheckerElementLogData(element),
+      issueCount: asyncIssues.length,
+    });
+  } catch (error) {
+    console.warn('[stet] Async issue enrichment failed', error);
+  }
+}
+
 function runCheckAndAnnotate(element: HTMLElement) {
   if (selfMutating) return;
 
@@ -319,6 +443,8 @@ function runCheckAndAnnotate(element: HTMLElement) {
 
   const startedAt = getNow();
   const text = readEditableText(element);
+  const checkVersion = (elementCheckVersions.get(element) ?? 0) + 1;
+  elementCheckVersions.set(element, checkVersion);
   if (isGoogleDocsEditableRoot(element)) {
     void rememberGoogleDocsCaret(element, text);
   }
@@ -334,7 +460,7 @@ function runCheckAndAnnotate(element: HTMLElement) {
 
   console.log(`[stet] Checking <${element.tagName.toLowerCase()}> (${text.length} chars)`);
 
-  const issues = filterIgnoredIssues(element, getIssues(element, text));
+  const issues = filterIgnoredIssues(element, getIssues(text));
   rememberElementIssues(element, issues);
 
   logHistoryEvent('checker:post-check', {
@@ -390,6 +516,10 @@ function runCheckAndAnnotate(element: HTMLElement) {
     elapsedMs: getElapsedMs(startedAt),
   });
   syncPageState();
+
+  if (hasAsyncRulesEnabled()) {
+    void refreshAsyncIssues(element, text, checkVersion);
+  }
 }
 
 function scheduleCheck(element: HTMLElement) {

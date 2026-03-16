@@ -2,7 +2,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('stet', () => ({
+const stetMocks = vi.hoisted(() => ({
   check: vi.fn(() => []),
   checkDocument: vi.fn((documentInput: { headline?: string; body: string[] }) => {
     const fullText = [documentInput.headline, ...documentInput.body].filter(Boolean).join('\n\n');
@@ -22,8 +22,17 @@ vi.mock('stet', () => ({
       },
     ];
   }),
+  checkDocumentAsync: vi.fn(async () => []),
   toCheckOptions: vi.fn(() => ({})),
   listPacks: vi.fn(() => [{ id: 'common', rules: [] }]),
+}));
+
+vi.mock('stet', () => ({
+  check: stetMocks.check,
+  checkDocument: stetMocks.checkDocument,
+  checkDocumentAsync: stetMocks.checkDocumentAsync,
+  toCheckOptions: stetMocks.toCheckOptions,
+  listPacks: stetMocks.listPacks,
 }));
 
 vi.mock('../packages/extension/src/content/dictionary-loader.js', () => ({
@@ -82,6 +91,20 @@ function createChromeMock() {
           return;
         }
 
+        if (message?.type === 'FETCH_FX_RATE') {
+          setTimeout(() => {
+            callback?.({
+              ok: true,
+              result: {
+                rate: 1.47,
+                timestamp: '2026-03-17',
+                source: 'Frankfurter (ECB)',
+              },
+            });
+          }, 80);
+          return;
+        }
+
         callback?.({});
       }),
       onMessage: {
@@ -113,6 +136,33 @@ describe('checker live sync', () => {
     vi.restoreAllMocks();
     vi.resetModules();
     document.body.innerHTML = '';
+    stetMocks.check.mockReset();
+    stetMocks.check.mockImplementation(() => []);
+    stetMocks.checkDocument.mockReset();
+    stetMocks.checkDocument.mockImplementation((documentInput: { headline?: string; body: string[] }) => {
+      const fullText = [documentInput.headline, ...documentInput.body].filter(Boolean).join('\n\n');
+      const offset = fullText.indexOf('teh');
+      if (offset === -1) return [];
+
+      return [
+        {
+          rule: 'SPELL',
+          severity: 'warning',
+          offset,
+          length: 3,
+          originalText: 'teh',
+          suggestion: 'the',
+          description: 'Spelling issue',
+          canFix: true,
+        },
+      ];
+    });
+    stetMocks.checkDocumentAsync.mockReset();
+    stetMocks.checkDocumentAsync.mockImplementation(async () => []);
+    stetMocks.toCheckOptions.mockReset();
+    stetMocks.toCheckOptions.mockImplementation(() => ({}));
+    stetMocks.listPacks.mockReset();
+    stetMocks.listPacks.mockImplementation(() => [{ id: 'common', rules: [] }]);
 
     Object.defineProperty(HTMLElement.prototype, 'isContentEditable', {
       configurable: true,
@@ -296,5 +346,69 @@ describe('checker live sync', () => {
 
     expect(textarea.value).toBe('teh draft');
     expect(mirror?.querySelectorAll('stet-mark')).toHaveLength(1);
+  });
+
+  it('upgrades async currency issues after the background FX lookup completes', async () => {
+    const { listeners } = createChromeMock();
+    stetMocks.listPacks.mockReturnValue([{ id: 'bt', rules: [{ id: 'BT-CUR-02', isAsync: true }] }]);
+    stetMocks.checkDocument.mockImplementation(() => [
+      {
+        rule: 'BT-CUR-02',
+        severity: 'info',
+        offset: 13,
+        length: 14,
+        originalText: '1.9 billion euros',
+        suggestion: null,
+        description: 'Add SGD conversion for Euro',
+        canFix: false,
+      },
+    ]);
+    stetMocks.checkDocumentAsync.mockImplementation(async (_documentInput, options) => {
+      const rate = await options.host.fetchFxRate('EUR', 'SGD');
+      return [
+        {
+          rule: 'BT-CUR-02',
+          severity: 'info',
+          offset: 13,
+          length: 14,
+          originalText: '1.9 billion euros',
+          suggestion: `1.9 billion euros (S$${(1.9 * rate.rate).toFixed(1)} billion)`,
+          description: 'Add SGD conversion for Euro',
+          canFix: true,
+        },
+      ];
+    });
+
+    const { initChecker } = await import('../packages/extension/src/content/checker.js');
+
+    document.body.innerHTML = `<div id="editor" contenteditable="true" aria-label="Draft body"></div>`;
+    const editor = document.getElementById('editor') as HTMLElement;
+    mockRect(editor);
+
+    await initChecker();
+
+    editor.textContent = 'Revenue hit 1.9 billion euros this quarter.';
+    editor.dispatchEvent(new FocusEvent('focus', { bubbles: true }));
+    editor.dispatchEvent(new Event('input', { bubbles: true }));
+
+    await new Promise((resolve) => setTimeout(resolve, 45));
+
+    const syncState = await dispatchRuntimeMessage(listeners[0], { type: 'GET_PAGE_ISSUES' }) as {
+      totalIssues: number;
+      issues: Array<{ canFix: boolean; suggestion: string | null | undefined }>;
+    };
+    expect(syncState.totalIssues).toBe(1);
+    expect(syncState.issues[0]?.canFix).toBe(false);
+    expect(syncState.issues[0]?.suggestion).toBeNull();
+
+    await new Promise((resolve) => setTimeout(resolve, 140));
+
+    const asyncState = await dispatchRuntimeMessage(listeners[0], { type: 'GET_PAGE_ISSUES' }) as {
+      totalIssues: number;
+      issues: Array<{ canFix: boolean; suggestion: string | null | undefined }>;
+    };
+    expect(asyncState.totalIssues).toBe(1);
+    expect(asyncState.issues[0]?.canFix).toBe(true);
+    expect(asyncState.issues[0]?.suggestion).toBe('1.9 billion euros (S$2.8 billion)');
   });
 });

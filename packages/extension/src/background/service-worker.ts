@@ -71,6 +71,12 @@ interface TraceEventEntry {
   frameId: number | null;
 }
 
+interface FxRateResult {
+  rate: number;
+  timestamp: string;
+  source: string;
+}
+
 const EMPTY_TAB_ISSUES: TabIssueState = {
   enabled: false,
   totalIssues: 0,
@@ -90,8 +96,10 @@ const PAGE_DEBUG_LATEST_KEY = 'stet:page:debug:last';
 const TRACE_STORAGE_KEY = 'stet:trace:events';
 const TRACE_MAX_ENTRIES = 2000;
 const TRACE_FILE_ENDPOINT = 'http://127.0.0.1:5123/trace';
+const FX_CACHE_TTL_MS = 60 * 60 * 1000;
 let traceEntriesCache: TraceEventEntry[] | null = null;
 let traceWriteChain: Promise<void> = Promise.resolve();
+const fxRateCache = new Map<string, { expiresAt: number; result: FxRateResult }>();
 
 function getIssueStateStorageArea(): chrome.storage.StorageArea {
   return chrome.storage.session ?? chrome.storage.local;
@@ -459,6 +467,60 @@ async function postTraceEntryToCollector(entry: TraceEventEntry) {
   } catch {}
 }
 
+function getFxCacheKey(from: string, to: string): string {
+  return `${from.toUpperCase()}:${to.toUpperCase()}`;
+}
+
+function getCachedFxRate(from: string, to: string): FxRateResult | null {
+  const cacheEntry = fxRateCache.get(getFxCacheKey(from, to));
+  if (!cacheEntry) return null;
+
+  if (cacheEntry.expiresAt <= Date.now()) {
+    fxRateCache.delete(getFxCacheKey(from, to));
+    return null;
+  }
+
+  return cacheEntry.result;
+}
+
+function rememberFxRate(from: string, to: string, result: FxRateResult): FxRateResult {
+  fxRateCache.set(getFxCacheKey(from, to), {
+    expiresAt: Date.now() + FX_CACHE_TTL_MS,
+    result,
+  });
+  return result;
+}
+
+async function fetchFrankfurterRate(from: string, to: string): Promise<FxRateResult> {
+  const response = await fetch(
+    `https://api.frankfurter.app/latest?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
+  );
+
+  if (!response.ok) {
+    throw new Error(`Frankfurter lookup failed with ${response.status}`);
+  }
+
+  const data = await response.json() as { date?: string; rates?: Record<string, number> };
+  const rate = data.rates?.[to];
+  if (typeof rate !== 'number') {
+    throw new Error(`No FX rate returned for ${from} -> ${to}`);
+  }
+
+  return {
+    rate,
+    timestamp: data.date ?? new Date().toISOString(),
+    source: 'Frankfurter (ECB)',
+  };
+}
+
+async function resolveFxRate(from: string, to: string): Promise<FxRateResult> {
+  const cached = getCachedFxRate(from, to);
+  if (cached) return cached;
+
+  const result = await fetchFrankfurterRate(from, to);
+  return rememberFxRate(from, to, result);
+}
+
 chrome.tabs.onRemoved.addListener((tabId) => {
   tabIssueStates.delete(tabId);
   clearHistoryDebugBuffers(tabId);
@@ -631,6 +693,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       saveSettings({ resolvedConfig: message.config }).then(() => {
         sendResponse({ ok: true });
       });
+      return true;
+
+    case 'FETCH_FX_RATE':
+      if (typeof message.from !== 'string' || typeof message.to !== 'string') {
+        sendResponse({ ok: false, error: 'Missing currency pair' });
+        return false;
+      }
+
+      void resolveFxRate(message.from, message.to)
+        .then((result) => {
+          sendResponse({ ok: true, result });
+        })
+        .catch((error: unknown) => {
+          sendResponse({
+            ok: false,
+            error: error instanceof Error ? error.message : 'FX lookup failed',
+          });
+        });
       return true;
 
     case 'SYNC_PAGE_ISSUES':

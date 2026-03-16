@@ -146,6 +146,50 @@ describe('background tab issue sync', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     vi.resetModules();
+    Reflect.deleteProperty(globalThis, 'fetch');
+  });
+
+  it('fetches and caches FX rates for async currency conversion', async () => {
+    const backing: StorageBacking = { sync: {}, local: {}, session: {} };
+    const chromeMock = setupChromeMock(backing);
+    (globalThis as typeof globalThis & { fetch: ReturnType<typeof vi.fn> }).fetch = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        date: '2026-03-17',
+        rates: {
+          SGD: 1.47,
+        },
+      }),
+    }));
+
+    await import('../packages/extension/src/background/service-worker.js');
+    const listener = chromeMock.runtimeListeners.at(-1);
+    expect(listener).toBeTruthy();
+
+    const first = await dispatchRuntimeMessage(listener!, {
+      type: 'FETCH_FX_RATE',
+      from: 'EUR',
+      to: 'SGD',
+    }) as {
+      ok: boolean;
+      result?: { rate: number; source: string; timestamp: string };
+    };
+
+    const second = await dispatchRuntimeMessage(listener!, {
+      type: 'FETCH_FX_RATE',
+      from: 'EUR',
+      to: 'SGD',
+    }) as {
+      ok: boolean;
+      result?: { rate: number; source: string; timestamp: string };
+    };
+
+    expect(first.ok).toBe(true);
+    expect(first.result?.rate).toBe(1.47);
+    expect(first.result?.source).toBe('Frankfurter (ECB)');
+    expect(second.ok).toBe(true);
+    expect(second.result?.rate).toBe(1.47);
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
   });
 
   it('loads persisted tab issue state after a worker restart', async () => {
