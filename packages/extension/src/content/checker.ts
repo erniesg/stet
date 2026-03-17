@@ -355,7 +355,7 @@ function runCheckAndAnnotate(element: HTMLElement) {
 
   const annotationSupport = getAnnotationSupport(element);
   const canRenderAnnotations = annotationSupport.mode !== 'panel';
-  const annotationMode = annotationSupport.mode === 'inline' ? 'inline' : 'overlay';
+  const annotationMode = annotationSupport.mode === 'overlay' ? 'overlay' : 'inline';
 
   logHistoryEvent('checker:pre-annotate', {
     ...getCheckerElementLogData(element),

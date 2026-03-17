@@ -125,6 +125,22 @@ export function hasGoogleDocsCoordinateSurface(
   return buildGoogleDocsWordEntries(root, fullText).length > 0;
 }
 
+export function getGoogleDocsViewportAnchorRect(root: HTMLElement): DOMRect | null {
+  const lineBlock = getVisibleLineBlocks(root)[0];
+  if (lineBlock) return lineBlock.getBoundingClientRect();
+
+  const wordNode = getVisibleWordNodes(root)[0];
+  if (wordNode) return wordNode.getBoundingClientRect();
+
+  const textRect = getVisibleTextRects(root)[0];
+  if (textRect) return textRect.getBoundingClientRect();
+
+  const page = root.querySelector<HTMLElement>(GOOGLE_DOCS_PAGE_SELECTOR);
+  if (page) return page.getBoundingClientRect();
+
+  return null;
+}
+
 export function collectGoogleDocsIssueRects(
   root: HTMLElement,
   start: number,

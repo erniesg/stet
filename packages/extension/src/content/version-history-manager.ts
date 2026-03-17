@@ -237,6 +237,7 @@ export class VersionHistoryManager {
       if (this.isFieldMode) {
         window.addEventListener('resize', this.handleViewportShift, true);
         window.addEventListener('scroll', this.handleViewportShift, true);
+        document.addEventListener('scroll', this.handleViewportShift, true);
       }
 
       const active = getInitialHistoryEditable(document.activeElement);
@@ -261,6 +262,7 @@ export class VersionHistoryManager {
     if (this.isFieldMode) {
       window.removeEventListener('resize', this.handleViewportShift, true);
       window.removeEventListener('scroll', this.handleViewportShift, true);
+      document.removeEventListener('scroll', this.handleViewportShift, true);
     }
 
     this.observer?.disconnect();
@@ -333,6 +335,9 @@ export class VersionHistoryManager {
 
   private buildUi() {
     this.root.className = `stet-history-root${this.isFieldMode ? ' is-field-mode' : ''}`;
+    if (window.location.hostname === 'docs.google.com') {
+      this.root.dataset.stetHost = 'google-docs';
+    }
 
     this.button.className = 'stet-history-button';
     this.button.type = 'button';
