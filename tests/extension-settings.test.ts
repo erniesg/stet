@@ -69,31 +69,39 @@ describe('extension settings normalization', () => {
     expect(effective.siteAllowlist).toEqual(['mail.google.com']);
   });
 
-  it('applies the selected demo profile without replacing the loaded newsroom config', async () => {
+  it('migrates legacy profileId sg-chinese to zh-SG language', async () => {
     installChromeStorageSync({
-      resolvedConfig: {
-        ...DEFAULT_RESOLVED_CONFIG,
-        packs: ['common', 'bt'],
-        language: 'en-US',
-        role: 'subeditor',
-        packConfig: {
-          ...DEFAULT_RESOLVED_CONFIG.packConfig,
-          language: 'en-US',
-        },
-      },
+      resolvedConfig: DEFAULT_RESOLVED_CONFIG,
       userOverrides: {
         profileId: 'sg-chinese',
       },
     });
 
+    const settings = await loadSettings();
+    // profileId should be stripped
+    expect(settings.userOverrides.profileId).toBeUndefined();
+    // language should be migrated
+    expect(settings.userOverrides.language).toBe('zh-SG');
+
     const effective = await getEffectiveConfig();
-    expect(effective.packs).toEqual(['common', 'bt']);
     expect(effective.language).toBe('zh-SG');
     expect(effective.packConfig.language).toBe('zh-SG');
-    expect(effective.rules.enable).toEqual(['COMMON-SPELL-01']);
   });
 
-  it('lets an explicit language override win over the selected demo profile', async () => {
+  it('migrates legacy zaobao alias to zh-SG language', async () => {
+    installChromeStorageSync({
+      resolvedConfig: DEFAULT_RESOLVED_CONFIG,
+      userOverrides: {
+        profileId: 'zaobao',
+      },
+    });
+
+    const settings = await loadSettings();
+    expect(settings.userOverrides.profileId).toBeUndefined();
+    expect(settings.userOverrides.language).toBe('zh-SG');
+  });
+
+  it('preserves explicit language even when profileId is present', async () => {
     installChromeStorageSync({
       resolvedConfig: DEFAULT_RESOLVED_CONFIG,
       userOverrides: {
@@ -102,9 +110,46 @@ describe('extension settings normalization', () => {
       },
     });
 
+    const settings = await loadSettings();
+    expect(settings.userOverrides.language).toBe('en-US');
+  });
+
+  it('normalizes packs by stripping empty entries', async () => {
+    installChromeStorageSync({
+      resolvedConfig: DEFAULT_RESOLVED_CONFIG,
+      userOverrides: {
+        packs: ['common', '', 'bt', '  '],
+      },
+    });
+
+    const settings = await loadSettings();
+    expect(settings.userOverrides.packs).toEqual(['common', 'bt']);
+  });
+
+  it('omits packs override when empty after normalization', async () => {
+    installChromeStorageSync({
+      resolvedConfig: DEFAULT_RESOLVED_CONFIG,
+      userOverrides: {
+        packs: ['', '  '],
+      },
+    });
+
+    const settings = await loadSettings();
+    expect(settings.userOverrides.packs).toBeUndefined();
+  });
+
+  it('applies user-selected packs via effective config', async () => {
+    installChromeStorageSync({
+      resolvedConfig: {
+        ...DEFAULT_RESOLVED_CONFIG,
+        packs: ['common', 'bt', 'tia'],
+      },
+      userOverrides: {
+        packs: ['common', 'bt'],
+      },
+    });
+
     const effective = await getEffectiveConfig();
-    expect(effective.language).toBe('en-US');
-    expect(effective.packConfig.language).toBe('en-US');
-    expect(effective.rules.enable).toEqual(['COMMON-SPELL-01']);
+    expect(effective.packs).toEqual(['common', 'bt']);
   });
 });

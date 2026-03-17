@@ -1074,6 +1074,29 @@ function unregisterGoogleDocsCompositionBridge(element: HTMLElement) {
   googleDocsCompositionBridges.delete(element);
 }
 
+let packDiscoveryRegistered = false;
+
+function registerPackDiscoveryHandler() {
+  if (packDiscoveryRegistered) return;
+  packDiscoveryRegistered = true;
+
+  try {
+    chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+      if (message?.type === 'GET_REGISTERED_PACKS') {
+        const registered = listPacks();
+        sendResponse({
+          packs: registered.map(p => ({
+            id: p.id,
+            name: p.name,
+            ruleCount: p.rules.length,
+          })),
+        });
+        return false;
+      }
+    });
+  } catch {}
+}
+
 function registerRuntimeHandlers() {
   if (runtimeHandlersRegistered) return;
   runtimeHandlersRegistered = true;
@@ -1445,6 +1468,10 @@ function loadSpellCheckDictionaryOnce(): Promise<string[]> {
 }
 
 function resolveRuntimeConfig(nextConfig: ResolvedStetConfig): ResolvedStetConfig {
+  // Always expose all registered packs in the config.
+  // User pack selection is applied via applyUserOverrides() at effective-config time,
+  // so resolveRuntimeConfig sees the already-filtered list. We restore all registered
+  // packs here so that SET_RESOLVED_CONFIG syncs the full set to storage for the popup.
   const registered = listPacks().map(p => p.id);
   let resolved = { ...nextConfig, packs: registered };
 
@@ -1528,6 +1555,10 @@ export async function initChecker(onDictionaryLoaded?: OnDictionaryLoaded) {
       config,
     });
   } catch {}
+
+  // Register GET_REGISTERED_PACKS early so the popup can discover packs
+  // even on pages where the checker is disabled or host is not allowed.
+  registerPackDiscoveryHandler();
 
   if (!config.enabled) { console.log('[stet] Disabled'); return; }
 

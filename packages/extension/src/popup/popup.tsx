@@ -5,14 +5,11 @@ import { diffText } from '../content/version-history-diff.js';
 import { createInlineDiff, createDiffStat } from '../shared/diff-renderer.js';
 import type { EditableHistoryRecord, VersionSnapshot } from '../content/version-history-core.js';
 import { normalizeSiteAllowlist } from '../host-access.js';
-import {
-  getActiveProfileId,
-  getProfileLanguage,
-  listLanguageOptions,
-  listProfiles,
-  resolveLanguageSetting,
-} from '../storage/profiles.js';
 import { getHistoryRefreshTarget } from './popup-sync.js';
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
 
 const COLORS = {
   primary: '#6366f1',
@@ -28,9 +25,21 @@ const ROLES = [
   { id: 'journalist', label: 'Journalist', desc: 'House style only — readability off' },
   { id: 'subeditor', label: 'Sub-editor', desc: 'Everything — readability, style, grammar' },
 ];
-const PROFILES = listProfiles();
-const LANGUAGE_OPTIONS = listLanguageOptions();
-type LanguageSetting = typeof LANGUAGE_OPTIONS[number]['id'];
+
+const LANGUAGE_MAP: Record<string, string> = {
+  'en-GB': 'English',
+  'en-US': 'English',
+  'zh-SG': '中文',
+};
+
+const LANGUAGE_CHOICES: { language: Language; label: string }[] = [
+  { language: 'en-GB', label: 'English' },
+  { language: 'zh-SG', label: '中文' },
+];
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
 
 interface PopupIssue {
   key: string;
@@ -77,6 +86,12 @@ interface PopupHistoryTargetsResponse {
   targets: PopupHistoryTarget[];
 }
 
+interface RegisteredPack {
+  id: string;
+  name: string;
+  ruleCount: number;
+}
+
 const EMPTY_ISSUES_STATE: PopupIssuesState = {
   enabled: false,
   totalIssues: 0,
@@ -98,16 +113,23 @@ function formatSuggestion(issue: PopupIssue): string {
   return `${issue.originalText} -> ${replacement}`;
 }
 
+function languageLabel(lang: string): string {
+  return LANGUAGE_MAP[lang] ?? lang;
+}
+
 type PopupView = 'main' | 'settings';
+
+// ---------------------------------------------------------------------------
+// Popup component
+// ---------------------------------------------------------------------------
 
 function Popup() {
   const [view, setView] = useState<PopupView>('main');
   const [enabled, setEnabled] = useState(true);
   const [packs, setPacks] = useState<string[]>([]);
+  const [userPacks, setUserPacks] = useState<string[] | undefined>(undefined);
+  const [registeredPacks, setRegisteredPacks] = useState<RegisteredPack[]>([]);
   const [role, setRole] = useState('journalist');
-  const [profileId, setProfileId] = useState('standard');
-  const [languageSetting, setLanguageSetting] = useState<LanguageSetting>('base');
-  const [profileLanguage, setProfileLanguage] = useState<Language>('en-GB');
   const [effectiveLanguage, setEffectiveLanguage] = useState('en-GB');
   const [loading, setLoading] = useState(true);
   const [activeTabId, setActiveTabId] = useState<number | null>(null);
@@ -138,11 +160,20 @@ function Popup() {
   const historyDiff = selectedSnapshot && historyLiveEditorAvailable
     ? diffText(historyCurrentText, selectedSnapshot.content)
     : null;
-  const activeProfile = PROFILES.find((profile) => profile.id === profileId) ?? PROFILES[0];
-  const activeLanguageOption = LANGUAGE_OPTIONS.find((option) => option.id === languageSetting) ?? LANGUAGE_OPTIONS[0];
   const currentSiteScoped = activeHostname
     ? siteAllowlist.length === 0 || siteAllowlist.some((entry) => activeHostname === entry || activeHostname.endsWith(`.${entry}`))
     : false;
+
+  // Derive compact summary line for main view
+  const summaryParts = [
+    languageLabel(effectiveLanguage),
+    ...packs.filter(p => p !== 'common').map(p => p.charAt(0).toUpperCase() + p.slice(1)),
+    ROLES.find(r => r.id === role)?.label ?? role,
+  ];
+  const summaryLine = summaryParts.join(' \u00b7 ');
+
+  // Derive active packs for the rules toggle UI
+  const activePacks = userPacks ?? packs;
 
   const loadConfigState = () => {
     chrome.runtime.sendMessage({ type: 'GET_SETTINGS' }, (resp) => {
@@ -156,26 +187,25 @@ function Popup() {
     });
 
     chrome.runtime.sendMessage({ type: 'GET_RAW_SETTINGS' }, (resp) => {
-      const nextProfileId = getActiveProfileId(resp?.userOverrides?.profileId, resp?.resolvedConfig);
-      const nextProfileLanguage = getProfileLanguage(resp?.resolvedConfig ?? null, nextProfileId);
-      const nextLanguageSetting = resolveLanguageSetting(resp?.userOverrides?.language, nextProfileLanguage);
-
       setSiteAllowlist(normalizeSiteAllowlist(resp?.userOverrides?.siteAllowlist));
-      setProfileId(nextProfileId);
-      setProfileLanguage(nextProfileLanguage);
-      setLanguageSetting(nextLanguageSetting);
+      setUserPacks(resp?.userOverrides?.packs ?? undefined);
+    });
+  };
 
-      if (resp?.userOverrides?.language && nextLanguageSetting === 'base') {
-        chrome.runtime.sendMessage({
-          type: 'UPDATE_USER_OVERRIDES',
-          overrides: { language: undefined },
-        });
-      }
+  const loadRegisteredPacks = () => {
+    withActiveTab((tabId) => {
+      chrome.runtime.sendMessage({ type: 'GET_REGISTERED_PACKS', tabId }, (resp) => {
+        if (chrome.runtime.lastError) return;
+        if (resp?.packs && Array.isArray(resp.packs)) {
+          setRegisteredPacks(resp.packs);
+        }
+      });
     });
   };
 
   useEffect(() => {
     loadConfigState();
+    loadRegisteredPacks();
     loadPageIssues(setIssuesState, setIssuesError, setActiveTabId);
     withActiveTabInfo((tabId, url) => {
       setActiveTabId(tabId);
@@ -309,27 +339,31 @@ function Popup() {
     });
   };
 
-  const changeProfile = (newProfileId: string) => {
-    setProfileId(newProfileId);
+  const changeLanguage = (nextLanguage: Language) => {
     chrome.runtime.sendMessage({
-      type: 'APPLY_PROFILE',
-      profileId: newProfileId,
+      type: 'UPDATE_USER_OVERRIDES',
+      overrides: { language: nextLanguage },
     }, () => {
       reloadConfigAndRefresh();
     });
   };
 
-  const changeLanguage = (nextLanguage: LanguageSetting) => {
-    const explicitLanguage = nextLanguage === 'base' || nextLanguage === profileLanguage
-      ? undefined
-      : nextLanguage;
+  const togglePack = (packId: string) => {
+    // 'common' is always active, cannot be deselected
+    if (packId === 'common') return;
 
-    setLanguageSetting(resolveLanguageSetting(explicitLanguage, profileLanguage));
+    const current = activePacks;
+    const next = current.includes(packId)
+      ? current.filter(id => id !== packId)
+      : [...current, packId];
+
+    // Ensure 'common' is always present
+    if (!next.includes('common')) next.unshift('common');
+
+    setUserPacks(next);
     chrome.runtime.sendMessage({
       type: 'UPDATE_USER_OVERRIDES',
-      overrides: {
-        language: explicitLanguage,
-      },
+      overrides: { packs: next },
     }, () => {
       reloadConfigAndRefresh();
     });
@@ -352,12 +386,6 @@ function Popup() {
       type: 'UPDATE_USER_OVERRIDES',
       overrides: { siteAllowlist: nextAllowlist },
     });
-  };
-
-  const enableOnlyCurrentSite = () => {
-    if (!activeHostname) return;
-    saveSiteAllowlist([activeHostname]);
-    if (activeTabId !== null) chrome.tabs.reload(activeTabId);
   };
 
   const addCurrentSiteToAllowlist = () => {
@@ -557,6 +585,11 @@ function Popup() {
     }
   }
 
+  // Build the list of pack toggles from registered packs
+  const packToggles = registeredPacks.length > 0
+    ? registeredPacks
+    : packs.map(id => ({ id, name: id, ruleCount: 0 }));
+
   if (loading) {
     return (
       <div style={styles.container}>
@@ -567,6 +600,7 @@ function Popup() {
 
   return (
     <div style={styles.container}>
+      {/* Header */}
       <div style={styles.header}>
         <div style={styles.logoRow}>
           <div style={styles.logo}>S</div>
@@ -598,6 +632,7 @@ function Popup() {
         </div>
       </div>
 
+      {/* Status bar with compact summary */}
       <div style={styles.status}>
         <div
           style={{
@@ -610,12 +645,90 @@ function Popup() {
         </span>
       </div>
 
+      {enabled && (
+        <div style={styles.summaryLine}>
+          {summaryLine}
+        </div>
+      )}
+
       {view === 'settings' ? (
         <>
-          <div style={styles.helper}>
-            Manage allowed sites and extension preferences.
+          {/* ─── Language ─── */}
+          <div style={styles.section}>
+            <span style={styles.sectionLabel}>Language</span>
+            <div style={styles.roleGroup}>
+              {LANGUAGE_CHOICES.map((choice) => (
+                <button
+                  key={choice.language}
+                  onClick={() => changeLanguage(choice.language)}
+                  style={{
+                    ...styles.roleBtn,
+                    background: effectiveLanguage === choice.language ? COLORS.primary : '#fff',
+                    color: effectiveLanguage === choice.language ? '#fff' : '#374151',
+                    borderColor: effectiveLanguage === choice.language ? COLORS.primary : COLORS.border,
+                  }}
+                >
+                  <span style={{ fontWeight: '500', fontSize: '12px' }}>{choice.label}</span>
+                </button>
+              ))}
+            </div>
           </div>
 
+          {/* ─── Rules (pack toggles) ─── */}
+          <div style={styles.section}>
+            <span style={styles.sectionLabel}>Rules</span>
+            <div style={styles.roleGroup}>
+              {packToggles.map((pack) => {
+                const isCommon = pack.id === 'common';
+                const isActive = activePacks.includes(pack.id);
+                return (
+                  <button
+                    key={pack.id}
+                    onClick={() => togglePack(pack.id)}
+                    disabled={isCommon}
+                    style={{
+                      ...styles.roleBtn,
+                      background: isActive ? COLORS.primary : '#fff',
+                      color: isActive ? '#fff' : '#374151',
+                      borderColor: isActive ? COLORS.primary : COLORS.border,
+                      opacity: isCommon ? 0.7 : 1,
+                      cursor: isCommon ? 'not-allowed' : 'pointer',
+                    }}
+                  >
+                    <span style={{ fontWeight: '500', fontSize: '12px' }}>
+                      {pack.name.charAt(0).toUpperCase() + pack.name.slice(1)}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* ─── Role ─── */}
+          <div style={styles.section}>
+            <span style={styles.sectionLabel}>Role</span>
+            <div style={styles.roleGroup}>
+              {ROLES.map((r) => (
+                <button
+                  key={r.id}
+                  onClick={() => changeRole(r.id)}
+                  style={{
+                    ...styles.roleBtn,
+                    background: role === r.id ? COLORS.primary : '#fff',
+                    color: role === r.id ? '#fff' : '#374151',
+                    borderColor: role === r.id ? COLORS.primary : COLORS.border,
+                  }}
+                >
+                  <span style={{ fontWeight: '500', fontSize: '12px' }}>{r.label}</span>
+                </button>
+              ))}
+            </div>
+            <span style={styles.roleDescription}>
+              {ROLES.find((r) => r.id === role)?.desc}
+            </span>
+          </div>
+
+          {/* ─── Allowed Sites ─── */}
           <div style={styles.section}>
             <span style={styles.sectionLabel}>Allowed Sites</span>
             <div style={styles.issueMeta}>
@@ -654,26 +767,7 @@ function Popup() {
             </div>
           </div>
 
-          <div style={styles.section}>
-            <span style={styles.sectionLabel}>Language</span>
-            <div style={styles.roleGroup}>
-              {LANGUAGE_OPTIONS.filter((o) => o.id !== 'base').map((option) => (
-                <button
-                  key={option.id}
-                  onClick={() => changeLanguage(option.id)}
-                  style={{
-                    ...styles.roleBtn,
-                    background: effectiveLanguage === option.id ? COLORS.primary : '#fff',
-                    color: effectiveLanguage === option.id ? '#fff' : '#374151',
-                    borderColor: effectiveLanguage === option.id ? COLORS.primary : COLORS.border,
-                  }}
-                >
-                  <span style={{ fontWeight: '500', fontSize: '12px' }}>{option.label}</span>
-                </button>
-              ))}
-            </div>
-          </div>
-
+          {/* ─── Advanced ─── */}
           <div style={styles.section}>
             <div style={styles.configRow}>
               <span style={styles.sectionLabel}>Advanced</span>
@@ -685,255 +779,219 @@ function Popup() {
         </>
       ) : (
         <>
-      <div style={styles.helper}>
-        Review issues and local version history here.
-      </div>
+          {/* ═══ Main view: Issues + Version History ═══ */}
 
-      <div style={styles.section}>
-        <span style={styles.sectionLabel}>Role</span>
-        <div style={styles.roleGroup}>
-          {ROLES.map((r) => (
-            <button
-              key={r.id}
-              onClick={() => changeRole(r.id)}
-              style={{
-                ...styles.roleBtn,
-                background: role === r.id ? COLORS.primary : '#fff',
-                color: role === r.id ? '#fff' : '#374151',
-                borderColor: role === r.id ? COLORS.primary : COLORS.border,
-              }}
-            >
-              <span style={{ fontWeight: '500', fontSize: '12px' }}>{r.label}</span>
-            </button>
-          ))}
-        </div>
-        <span style={styles.roleDescription}>
-          {ROLES.find((r) => r.id === role)?.desc}
-        </span>
-      </div>
+          <div style={styles.section}>
+            <div style={styles.configRow}>
+              <span style={styles.sectionLabel}>Issues</span>
+              <button type="button" style={styles.linkButton} onClick={refreshIssues}>
+                Refresh
+              </button>
+            </div>
 
-      <div style={styles.section}>
-        <div style={styles.configRow}>
-          <span style={styles.sectionLabel}>Packs</span>
-          <span style={styles.valueText}>{packs.join(', ') || 'common'}</span>
-        </div>
-        <div style={styles.issueMeta}>
-          Effective language: {effectiveLanguage}
-        </div>
-      </div>
+            <div style={styles.issueSummary}>
+              {issuesState.totalIssues} issue{issuesState.totalIssues === 1 ? '' : 's'} on page
+              {` \u00b7 ${fixableCount} auto-fixable here`}
+            </div>
 
-      <div style={styles.section}>
-        <div style={styles.configRow}>
-          <span style={styles.sectionLabel}>Issues</span>
-          <button type="button" style={styles.linkButton} onClick={refreshIssues}>
-            Refresh
-          </button>
-        </div>
+            <div style={styles.issueMeta}>
+              {issuesState.activeLabel
+                ? `Current editor: ${issuesState.activeLabel}`
+                : 'No editor detected on this page.'}
+            </div>
 
-        <div style={styles.issueSummary}>
-          {issuesState.totalIssues} issue{issuesState.totalIssues === 1 ? '' : 's'} on page
-          {` · ${fixableCount} auto-fixable here`}
-        </div>
+            {fixableCount === 0 && issuesState.issues.length > 0 && (
+              <div style={styles.issueMeta}>
+                Current issues are advisory only. One-click apply is limited to deterministic fixes.
+              </div>
+            )}
 
-        <div style={styles.issueMeta}>
-          {issuesState.activeLabel
-            ? `Current editor: ${issuesState.activeLabel}`
-            : 'No editor detected on this page.'}
-        </div>
+            {issuesState.editorCount > 1 && issuesState.activeLabel && (
+              <div style={styles.issueMeta}>
+                Showing the last focused editor.
+              </div>
+            )}
 
-        {fixableCount === 0 && issuesState.issues.length > 0 && (
-          <div style={styles.issueMeta}>
-            Current issues are advisory only. One-click apply is limited to deterministic fixes.
-          </div>
-        )}
+            {issuesError && <div style={styles.errorText}>{issuesError}</div>}
 
-        {issuesState.editorCount > 1 && issuesState.activeLabel && (
-          <div style={styles.issueMeta}>
-            Showing the last focused editor.
-          </div>
-        )}
+            <div style={styles.issueList}>
+              {issuesState.issues.length === 0 && !issuesError && (
+                <div style={styles.emptyState}>No issues for the current editor.</div>
+              )}
 
-        {issuesError && <div style={styles.errorText}>{issuesError}</div>}
-
-        <div style={styles.issueList}>
-          {issuesState.issues.length === 0 && !issuesError && (
-            <div style={styles.emptyState}>No issues for the current editor.</div>
-          )}
-
-          {issuesState.issues.map((issue) => {
-            const checked = selectedKeys.includes(issue.key);
-            return (
-              <label
-                key={issue.key}
-                style={{
-                  ...styles.issueRow,
-                  opacity: issue.canFix ? 1 : 0.85,
-                }}
-              >
-                <input
-                  type="checkbox"
-                  checked={checked}
-                  disabled={!issue.canFix}
-                  onChange={(event) => toggleIssueSelection(issue.key, event.currentTarget.checked)}
-                  style={styles.checkbox}
-                />
-                <div style={styles.issueContent}>
-                  <div style={styles.issueRule}>{issue.rule}</div>
-                  <div style={styles.issueText}>
-                    {formatSuggestion(issue)}
-                  </div>
-                  <div style={styles.issueDescription}>{issue.description}</div>
-                  {!issue.canFix && (
-                    <div style={styles.issueReadonlyHint}>Review only · no safe auto-fix</div>
-                  )}
-                </div>
-              </label>
-            );
-          })}
-        </div>
-
-        <button
-          type="button"
-          onClick={applySelected}
-          disabled={selectedKeys.length === 0 || applying}
-          style={{
-            ...styles.primaryButton,
-            opacity: selectedKeys.length === 0 || applying ? 0.55 : 1,
-          }}
-        >
-          {applying
-            ? 'Applying...'
-            : selectedKeys.length === 0
-              ? 'No selected fixes'
-              : `Apply selected (${selectedKeys.length})`}
-        </button>
-      </div>
-
-      <div style={styles.section}>
-        <div style={styles.configRow}>
-          <span style={styles.sectionLabel}>Version History</span>
-          <div style={styles.inlineActions}>
-            <button type="button" style={styles.linkButton} onClick={refreshHistoryForSelected}>
-              Refresh
-            </button>
-            <button
-              type="button"
-              style={styles.linkButton}
-              onClick={captureSnapshot}
-              disabled={!selectedHistoryTarget || !historyLiveEditorAvailable || historySnapshotting}
-            >
-              {historySnapshotting ? 'Saving...' : 'Snapshot now'}
-            </button>
-          </div>
-        </div>
-
-        <div style={styles.issueSummary}>
-          {historySnapshots.length} saved version{historySnapshots.length === 1 ? '' : 's'}
-        </div>
-
-        <div style={styles.issueMeta}>
-          {historyLabel
-            ? `Selected editor: ${historyLabel}`
-            : historyTargets.length > 0
-              ? 'Select an editor to inspect its local history.'
-              : 'No editor detected on this page.'}
-        </div>
-
-        {historyTargets.length > 1 && (
-          <div style={styles.historyTargetList}>
-            {historyTargets.map((target) => {
-              const selected = getHistoryTargetKey(target) === selectedHistoryTargetKey;
-              return (
-                <button
-                  key={getHistoryTargetKey(target)}
-                  type="button"
-                  onClick={() => setSelectedHistoryTargetKey(getHistoryTargetKey(target))}
-                  style={{
-                    ...styles.historyTargetButton,
-                    ...(selected ? styles.historyTargetButtonSelected : {}),
-                  }}
-                >
-                  <span style={styles.historyTargetButtonLabel}>{target.label}</span>
-                  <span style={styles.historyTargetButtonMeta}>
-                    {target.snapshotCount} saved
-                    {target.isActive ? ' · active' : ''}
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-        )}
-
-        {historyError && <div style={styles.errorText}>{historyError}</div>}
-
-        {historyLoading ? (
-          <div style={styles.emptyState}>Loading version history...</div>
-        ) : historyTargets.length === 0 ? (
-          <div style={styles.emptyState}>No live editors with version history support on this page.</div>
-        ) : historySnapshots.length === 0 ? (
-          <div style={styles.emptyState}>No local versions saved for the selected editor yet.</div>
-        ) : (
-          <>
-            <div style={styles.historyList}>
-              {[...historySnapshots].reverse().map((snapshot) => {
-                const selected = snapshot.id === selectedSnapshotId;
+              {issuesState.issues.map((issue) => {
+                const checked = selectedKeys.includes(issue.key);
                 return (
-                  <button
-                    key={snapshot.id}
-                    type="button"
-                    onClick={(event) => {
-                      setSelectedSnapshotId(snapshot.id);
-                      event.currentTarget.blur();
-                    }}
+                  <label
+                    key={issue.key}
                     style={{
-                      ...styles.historyRow,
-                      ...(selected ? styles.historyRowSelected : {}),
+                      ...styles.issueRow,
+                      opacity: issue.canFix ? 1 : 0.85,
                     }}
                   >
-                    <div style={styles.historyRowTitle}>{formatSnapshotLabel(snapshot)}</div>
-                    <div style={styles.historyRowMeta}>
-                      {formatAbsoluteDate(snapshot.savedAt)} · {snapshot.charCount.toLocaleString()} chars
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      disabled={!issue.canFix}
+                      onChange={(event) => toggleIssueSelection(issue.key, event.currentTarget.checked)}
+                      style={styles.checkbox}
+                    />
+                    <div style={styles.issueContent}>
+                      <div style={styles.issueRule}>{issue.rule}</div>
+                      <div style={styles.issueText}>
+                        {formatSuggestion(issue)}
+                      </div>
+                      <div style={styles.issueDescription}>{issue.description}</div>
+                      {!issue.canFix && (
+                        <div style={styles.issueReadonlyHint}>Review only · no safe auto-fix</div>
+                      )}
                     </div>
-                  </button>
+                  </label>
                 );
               })}
             </div>
 
-            <div style={styles.historyPreview}>
-              <DiffSummary
-                snapshot={selectedSnapshot}
-                diff={historyDiff}
-                editorAvailable={historyLiveEditorAvailable}
-              />
-              <DiffBox
-                snapshot={selectedSnapshot}
-                diff={historyDiff}
-                editorAvailable={historyLiveEditorAvailable}
-              />
-            </div>
-
             <button
               type="button"
-              onClick={restoreSnapshot}
-              disabled={!selectedSnapshot || !historyLiveEditorAvailable || historyRestoring}
+              onClick={applySelected}
+              disabled={selectedKeys.length === 0 || applying}
               style={{
                 ...styles.primaryButton,
-                ...(selectedSnapshot && historyLiveEditorAvailable && !historyRestoring ? {} : styles.disabledButton),
+                opacity: selectedKeys.length === 0 || applying ? 0.55 : 1,
               }}
             >
-              {historyRestoring
-                ? 'Restoring...'
-                : !selectedSnapshot
-                  ? 'Select a version'
-                  : historyLiveEditorAvailable
-                    ? 'Restore selected version'
-                    : 'Restore unavailable'}
+              {applying
+                ? 'Applying...'
+                : selectedKeys.length === 0
+                  ? 'No selected fixes'
+                  : `Apply selected (${selectedKeys.length})`}
             </button>
-          </>
-        )}
-      </div>
+          </div>
 
-      </>
+          <div style={styles.section}>
+            <div style={styles.configRow}>
+              <span style={styles.sectionLabel}>Version History</span>
+              <div style={styles.inlineActions}>
+                <button type="button" style={styles.linkButton} onClick={refreshHistoryForSelected}>
+                  Refresh
+                </button>
+                <button
+                  type="button"
+                  style={styles.linkButton}
+                  onClick={captureSnapshot}
+                  disabled={!selectedHistoryTarget || !historyLiveEditorAvailable || historySnapshotting}
+                >
+                  {historySnapshotting ? 'Saving...' : 'Snapshot now'}
+                </button>
+              </div>
+            </div>
+
+            <div style={styles.issueSummary}>
+              {historySnapshots.length} saved version{historySnapshots.length === 1 ? '' : 's'}
+            </div>
+
+            <div style={styles.issueMeta}>
+              {historyLabel
+                ? `Selected editor: ${historyLabel}`
+                : historyTargets.length > 0
+                  ? 'Select an editor to inspect its local history.'
+                  : 'No editor detected on this page.'}
+            </div>
+
+            {historyTargets.length > 1 && (
+              <div style={styles.historyTargetList}>
+                {historyTargets.map((target) => {
+                  const selected = getHistoryTargetKey(target) === selectedHistoryTargetKey;
+                  return (
+                    <button
+                      key={getHistoryTargetKey(target)}
+                      type="button"
+                      onClick={() => setSelectedHistoryTargetKey(getHistoryTargetKey(target))}
+                      style={{
+                        ...styles.historyTargetButton,
+                        ...(selected ? styles.historyTargetButtonSelected : {}),
+                      }}
+                    >
+                      <span style={styles.historyTargetButtonLabel}>{target.label}</span>
+                      <span style={styles.historyTargetButtonMeta}>
+                        {target.snapshotCount} saved
+                        {target.isActive ? ' · active' : ''}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+
+            {historyError && <div style={styles.errorText}>{historyError}</div>}
+
+            {historyLoading ? (
+              <div style={styles.emptyState}>Loading version history...</div>
+            ) : historyTargets.length === 0 ? (
+              <div style={styles.emptyState}>No live editors with version history support on this page.</div>
+            ) : historySnapshots.length === 0 ? (
+              <div style={styles.emptyState}>No local versions saved for the selected editor yet.</div>
+            ) : (
+              <>
+                <div style={styles.historyList}>
+                  {[...historySnapshots].reverse().map((snapshot) => {
+                    const selected = snapshot.id === selectedSnapshotId;
+                    return (
+                      <button
+                        key={snapshot.id}
+                        type="button"
+                        onClick={(event) => {
+                          setSelectedSnapshotId(snapshot.id);
+                          event.currentTarget.blur();
+                        }}
+                        style={{
+                          ...styles.historyRow,
+                          ...(selected ? styles.historyRowSelected : {}),
+                        }}
+                      >
+                        <div style={styles.historyRowTitle}>{formatSnapshotLabel(snapshot)}</div>
+                        <div style={styles.historyRowMeta}>
+                          {formatAbsoluteDate(snapshot.savedAt)} · {snapshot.charCount.toLocaleString()} chars
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <div style={styles.historyPreview}>
+                  <DiffSummary
+                    snapshot={selectedSnapshot}
+                    diff={historyDiff}
+                    editorAvailable={historyLiveEditorAvailable}
+                  />
+                  <DiffBox
+                    snapshot={selectedSnapshot}
+                    diff={historyDiff}
+                    editorAvailable={historyLiveEditorAvailable}
+                  />
+                </div>
+
+                <button
+                  type="button"
+                  onClick={restoreSnapshot}
+                  disabled={!selectedSnapshot || !historyLiveEditorAvailable || historyRestoring}
+                  style={{
+                    ...styles.primaryButton,
+                    ...(selectedSnapshot && historyLiveEditorAvailable && !historyRestoring ? {} : styles.disabledButton),
+                  }}
+                >
+                  {historyRestoring
+                    ? 'Restoring...'
+                    : !selectedSnapshot
+                      ? 'Select a version'
+                      : historyLiveEditorAvailable
+                        ? 'Restore selected version'
+                        : 'Restore unavailable'}
+                </button>
+              </>
+            )}
+          </div>
+        </>
       )}
 
       <div style={styles.footer}>
@@ -942,6 +1000,10 @@ function Popup() {
     </div>
   );
 }
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 function loadPageIssues(
   setIssuesState: (state: PopupIssuesState) => void,
@@ -1145,6 +1207,10 @@ function withActiveTab(onTab: (tabId: number) => void, onMissing?: () => void) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Styles
+// ---------------------------------------------------------------------------
+
 const styles: Record<string, Record<string, string | number>> = {
   container: {
     width: '320px',
@@ -1220,21 +1286,21 @@ const styles: Record<string, Record<string, string | number>> = {
     display: 'flex',
     alignItems: 'center',
     gap: '8px',
-    marginBottom: '12px',
+    marginBottom: '4px',
     padding: '8px 10px',
     background: COLORS.lightBg,
     borderRadius: '6px',
+  },
+  summaryLine: {
+    fontSize: '12px',
+    color: COLORS.gray,
+    marginBottom: '10px',
+    paddingLeft: '10px',
   },
   dot: {
     width: '8px',
     height: '8px',
     borderRadius: '4px',
-  },
-  helper: {
-    fontSize: '12px',
-    lineHeight: '1.45',
-    color: COLORS.gray,
-    marginBottom: '10px',
   },
   section: {
     borderTop: `1px solid ${COLORS.border}`,

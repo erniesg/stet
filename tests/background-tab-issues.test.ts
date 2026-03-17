@@ -258,17 +258,24 @@ describe('background tab issue sync', () => {
     );
   });
 
-  it('applying a profile clears stale language and role overrides', async () => {
+  it('GET_REGISTERED_PACKS falls back to stored config packs when no tabId', async () => {
     const backing: StorageBacking = {
       sync: {
-        userOverrides: {
-          profileId: 'standard',
+        resolvedConfig: {
+          packs: ['common', 'bt'],
           language: 'en-GB',
-          role: 'subeditor',
-          disableRules: ['COMMON-SPELL-01'],
-          siteAllowlist: ['docs.google.com'],
+          role: 'journalist',
+          packConfig: { freThreshold: 30, paragraphCharLimit: 320 },
+          rules: { enable: [], disable: [] },
+          dictionaries: [],
+          prompts: {},
+          workflows: {},
+          feedback: { endpoint: null, batchSize: 20, includeContext: false },
           enabled: true,
+          siteAllowlist: [],
+          debounceMs: 500,
         },
+        userOverrides: {},
       },
       local: {},
       session: {},
@@ -280,18 +287,12 @@ describe('background tab issue sync', () => {
     expect(listener).toBeTruthy();
 
     const response = await dispatchRuntimeMessage(listener!, {
-      type: 'APPLY_PROFILE',
-      profileId: 'sg-chinese',
-    }) as { ok: boolean; profileId: string };
+      type: 'GET_REGISTERED_PACKS',
+    }) as { packs: Array<{ id: string; name: string; ruleCount: number }> };
 
-    expect(response).toEqual({ ok: true, profileId: 'sg-chinese' });
-    expect(backing.sync.userOverrides).toEqual({
-      profileId: 'sg-chinese',
-      language: undefined,
-      role: undefined,
-      disableRules: undefined,
-      siteAllowlist: ['docs.google.com'],
-      enabled: true,
-    });
+    expect(response.packs).toEqual([
+      { id: 'common', name: 'common', ruleCount: 0 },
+      { id: 'bt', name: 'bt', ruleCount: 0 },
+    ]);
   });
 });

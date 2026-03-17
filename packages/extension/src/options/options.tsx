@@ -1,46 +1,30 @@
 import { render } from 'preact';
 import { useEffect, useState } from 'preact/hooks';
+import type { Language } from 'stet';
 import { loadCustomTerms, saveCustomTerms } from '../content/dictionary-loader.js';
 import { formatSiteAllowlist, parseSiteAllowlistInput } from '../host-access.js';
-import {
-  getActiveProfileId,
-  getProfileLanguage,
-  listLanguageOptions,
-  listProfiles,
-  resolveLanguageSetting,
-} from '../storage/profiles.js';
 
-const profiles = listProfiles();
-const languageOptions = listLanguageOptions();
-type LanguageSetting = typeof languageOptions[number]['id'];
+const ENGLISH_VARIANTS: { id: Language; label: string; description: string }[] = [
+  { id: 'en-GB', label: 'British English (en-GB)', description: 'Default. Commonwealth spelling and style.' },
+  { id: 'en-US', label: 'American English (en-US)', description: 'US spelling and style.' },
+];
 
 function Options() {
-  const [profileId, setProfileId] = useState<string>('standard');
-  const [language, setLanguage] = useState<LanguageSetting>('base');
-  const [profileLanguage, setProfileLanguage] = useState<'en-GB' | 'en-US' | 'zh-SG'>('en-GB');
+  const [language, setLanguage] = useState<Language>('en-GB');
   const [siteAllowlist, setSiteAllowlist] = useState('');
   const [customTerms, setCustomTerms] = useState('');
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
   const loadConfigState = () => {
-    chrome.runtime.sendMessage({ type: 'GET_RAW_SETTINGS' }, (resp) => {
-      const nextProfileId = getActiveProfileId(resp?.userOverrides?.profileId, resp?.resolvedConfig);
-      const nextProfileLanguage = getProfileLanguage(resp?.resolvedConfig ?? null, nextProfileId);
-      const nextLanguage = resolveLanguageSetting(resp?.userOverrides?.language, nextProfileLanguage);
-
-      setProfileId(nextProfileId);
-      setProfileLanguage(nextProfileLanguage);
-      setLanguage(nextLanguage);
-      setSiteAllowlist(formatSiteAllowlist(resp?.userOverrides?.siteAllowlist));
+    chrome.runtime.sendMessage({ type: 'GET_SETTINGS' }, (resp) => {
+      const lang = resp?.config?.language ?? 'en-GB';
+      setLanguage(lang);
       setLoading(false);
+    });
 
-      if (resp?.userOverrides?.language && nextLanguage === 'base') {
-        chrome.runtime.sendMessage({
-          type: 'UPDATE_USER_OVERRIDES',
-          overrides: { language: undefined },
-        });
-      }
+    chrome.runtime.sendMessage({ type: 'GET_RAW_SETTINGS' }, (resp) => {
+      setSiteAllowlist(formatSiteAllowlist(resp?.userOverrides?.siteAllowlist));
     });
   };
 
@@ -56,29 +40,13 @@ function Options() {
     window.setTimeout(() => setStatusMessage(null), 1800);
   };
 
-  const applyProfile = (nextProfileId: string) => {
-    chrome.runtime.sendMessage({
-      type: 'APPLY_PROFILE',
-      profileId: nextProfileId,
-    }, () => {
-      loadConfigState();
-      showStatus(`Applied ${profiles.find(profile => profile.id === nextProfileId)?.name ?? nextProfileId}`);
-    });
-  };
-
-  const applyLanguage = (nextLanguage: LanguageSetting) => {
-    const explicitLanguage = nextLanguage === 'base' || nextLanguage === profileLanguage
-      ? undefined
-      : nextLanguage;
-
+  const applyLanguage = (nextLanguage: Language) => {
     chrome.runtime.sendMessage({
       type: 'UPDATE_USER_OVERRIDES',
-      overrides: {
-        language: explicitLanguage,
-      },
+      overrides: { language: nextLanguage },
     }, () => {
-      setLanguage(resolveLanguageSetting(explicitLanguage, profileLanguage));
-      showStatus(explicitLanguage ? `Forced ${explicitLanguage}` : `Following profile language (${profileLanguage})`);
+      setLanguage(nextLanguage);
+      showStatus(`Language set to ${nextLanguage}`);
     });
   };
 
@@ -117,19 +85,19 @@ function Options() {
       <h1>Stet Settings</h1>
 
       <section style={{ border: '1px solid #e5e7eb', borderRadius: '16px', padding: '18px', background: '#fff', marginBottom: '18px' }}>
-        <h2 style={{ marginTop: 0 }}>Profile</h2>
+        <h2 style={{ marginTop: 0 }}>English Variant</h2>
         <p style={{ color: '#4b5563', lineHeight: 1.5 }}>
-          Choose a demo preset without replacing the underlying newsroom config. Singapore Chinese keeps the current build or tenant setup, but switches the checker to zh-SG spellcheck-only mode.
+          Choose between British and American English when English is active. This is a fine-grained option — the popup Language toggle switches between English and Chinese.
         </p>
         <div style={{ display: 'grid', gap: '12px' }}>
-          {profiles.map((profile) => {
-            const selected = profileId === profile.id;
+          {ENGLISH_VARIANTS.map((variant) => {
+            const selected = language === variant.id;
             return (
               <button
-                key={profile.id}
+                key={variant.id}
                 type="button"
                 disabled={loading}
-                onClick={() => applyProfile(profile.id)}
+                onClick={() => applyLanguage(variant.id)}
                 style={{
                   textAlign: 'left',
                   padding: '14px 16px',
@@ -140,52 +108,11 @@ function Options() {
                 }}
               >
                 <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', alignItems: 'center' }}>
-                  <strong>{profile.name}</strong>
+                  <strong>{variant.label}</strong>
                   {selected && <span style={{ color: '#2563eb', fontSize: '13px', fontWeight: 600 }}>Current</span>}
                 </div>
                 <div style={{ color: '#4b5563', marginTop: '6px', lineHeight: 1.45 }}>
-                  {profile.description}
-                </div>
-                {profile.suggestedHosts.length > 0 && (
-                  <div style={{ color: '#6b7280', marginTop: '8px', fontSize: '13px' }}>
-                    Suggested hosts: {profile.suggestedHosts.join(', ')}
-                  </div>
-                )}
-              </button>
-            );
-          })}
-        </div>
-      </section>
-
-      <section style={{ border: '1px solid #e5e7eb', borderRadius: '16px', padding: '18px', background: '#fff', marginBottom: '18px' }}>
-        <h2 style={{ marginTop: 0 }}>Language</h2>
-        <p style={{ color: '#4b5563', lineHeight: 1.5 }}>
-          Override the active language for demos. <code>Auto</code> follows the selected profile and is currently <code>{profileLanguage}</code>.
-        </p>
-        <div style={{ display: 'grid', gap: '12px' }}>
-          {languageOptions.map((option) => {
-            const selected = language === option.id;
-            return (
-              <button
-                key={option.id}
-                type="button"
-                disabled={loading}
-                onClick={() => applyLanguage(option.id)}
-                style={{
-                  textAlign: 'left',
-                  padding: '14px 16px',
-                  borderRadius: '12px',
-                  border: selected ? '2px solid #2563eb' : '1px solid #d1d5db',
-                  background: selected ? '#eff6ff' : '#fff',
-                  cursor: loading ? 'default' : 'pointer',
-                }}
-              >
-                <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', alignItems: 'center' }}>
-                  <strong>{option.label}</strong>
-                  {selected && <span style={{ color: '#2563eb', fontSize: '13px', fontWeight: 600 }}>Current</span>}
-                </div>
-                <div style={{ color: '#4b5563', marginTop: '6px', lineHeight: 1.45 }}>
-                  {option.description}
+                  {variant.description}
                 </div>
               </button>
             );
@@ -196,13 +123,13 @@ function Options() {
       <section style={{ border: '1px solid #e5e7eb', borderRadius: '16px', padding: '18px', background: '#fff', marginBottom: '18px' }}>
         <h2 style={{ marginTop: 0 }}>Custom Spellcheck Terms</h2>
         <p style={{ color: '#4b5563', lineHeight: 1.5 }}>
-          Add one accepted term per line. These entries are merged into the active spellcheck dictionary, including the Singapore Chinese `zh-SG` demo profile and any manual language override.
+          Add one accepted term per line. These entries are merged into the active spellcheck dictionary.
         </p>
         <textarea
           value={customTerms}
           onInput={(event) => setCustomTerms((event.currentTarget as HTMLTextAreaElement).value)}
           disabled={loading}
-          placeholder={'巴士转换站\n德士\n组屋区'}
+          placeholder={'organisation\nMinister Mentor'}
           style={{
             width: '100%',
             minHeight: '160px',

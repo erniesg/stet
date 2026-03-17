@@ -130,6 +130,9 @@ export function applyUserOverrides(
   if (overrides.role) {
     result.role = overrides.role;
   }
+  if (overrides.packs && overrides.packs.length > 0) {
+    result.packs = [...overrides.packs];
+  }
   if (overrides.debounceMs !== undefined) {
     result.debounceMs = overrides.debounceMs;
   }

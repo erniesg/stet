@@ -356,6 +356,8 @@ export interface UserOverrides {
   language?: Language;
   /** Override active role */
   role?: string;
+  /** Override active packs (user-selected subset of registered packs) */
+  packs?: string[];
   /** Additional rules to disable (user-level ignore) */
   disableRules?: string[];
   /** Per-site enable/disable */

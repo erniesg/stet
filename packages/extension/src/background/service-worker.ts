@@ -11,7 +11,6 @@ import {
   DEFAULT_STORED_SETTINGS,
   updateUserOverrides,
 } from '../storage/settings.js';
-import { getProfile } from '../storage/profiles.js';
 
 interface PopupIssueRecord {
   key: string;
@@ -632,16 +631,34 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       });
       return true;
 
-    case 'APPLY_PROFILE': {
-      const preset = getProfile(typeof message.profileId === 'string' ? message.profileId : 'standard');
-      updateUserOverrides({
-        profileId: preset.id,
-        language: undefined,
-        role: undefined,
-        disableRules: undefined,
-      }).then(() => {
-        sendResponse({ ok: true, profileId: preset.id });
-      });
+    case 'GET_REGISTERED_PACKS': {
+      // Forward to content script; fall back to stored config packs
+      const targetTabId = typeof message.tabId === 'number' ? message.tabId : undefined;
+      if (targetTabId !== undefined) {
+        chrome.tabs.sendMessage(
+          targetTabId,
+          { type: 'GET_REGISTERED_PACKS' },
+          { frameId: 0 },
+          (resp) => {
+            if (chrome.runtime.lastError || !resp) {
+              // Fallback: return packs from stored config
+              getEffectiveConfig().then((config) => {
+                sendResponse({
+                  packs: config.packs.map((id: string) => ({ id, name: id, ruleCount: 0 })),
+                });
+              });
+              return;
+            }
+            sendResponse(resp);
+          },
+        );
+      } else {
+        getEffectiveConfig().then((config) => {
+          sendResponse({
+            packs: config.packs.map((id: string) => ({ id, name: id, ruleCount: 0 })),
+          });
+        });
+      }
       return true;
     }
 
