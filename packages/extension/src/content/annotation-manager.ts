@@ -507,8 +507,9 @@ export class AnnotationManager {
     const end = Math.max(selectionState.start, selectionState.end);
 
     if (start === end) {
-      // Strictly inside — caret at boundary should not suppress annotation
-      return start > issueStart && start < issueEnd;
+      // Skip if caret is inside or at end of issue, but not at start
+      // (so first-word issues at offset 0 still get annotated)
+      return start > issueStart && start <= issueEnd;
     }
 
     return issueStart < end && issueEnd > start;
@@ -646,7 +647,6 @@ export class AnnotationManager {
     const clearedMarks = this.getRenderedMarkCount();
     this.clear();
     if (issues.length === 0) {
-      this.restoreSelection(selectionBefore, this.buildNodeMap());
       logHistoryEvent('checker:annotate', {
         ...getAnnotationElementLogData(this.element),
         mode: 'inline',
@@ -753,7 +753,10 @@ export class AnnotationManager {
       }
     }
 
-    this.restoreSelection(selectionBefore, this.buildNodeMap());
+    // Do NOT restore selection — surroundContents changes the DOM structure
+    // and restoreSelection can misplace the caret. The intersectsActiveSelection
+    // skip ensures no mark wraps the text node at the cursor, so the browser
+    // maintains cursor position naturally through the remote DOM changes.
     logHistoryEvent('checker:annotate', {
       ...getAnnotationElementLogData(this.element),
       mode: 'inline',
