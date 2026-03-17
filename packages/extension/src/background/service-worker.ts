@@ -636,6 +636,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const preset = getProfile(typeof message.profileId === 'string' ? message.profileId : 'standard');
       updateUserOverrides({
         profileId: preset.id,
+        language: undefined,
+        role: undefined,
+        disableRules: undefined,
       }).then(() => {
         sendResponse({ ok: true, profileId: preset.id });
       });

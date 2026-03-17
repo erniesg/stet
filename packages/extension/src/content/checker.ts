@@ -1338,8 +1338,9 @@ function resolveRuntimeConfig(nextConfig: ResolvedStetConfig): ResolvedStetConfi
   const registered = listPacks().map(p => p.id);
   let resolved = { ...nextConfig, packs: registered };
 
-  // If bt-pack is active, disable common spell check (bt-pack's is more complete)
-  if (registered.includes('bt')) {
+  // If bt-pack is active, disable common spell check for English flows.
+  // zh-SG relies on COMMON-SPELL-01 because bt-pack spellcheck is Latin-script only.
+  if (registered.includes('bt') && resolved.language !== 'zh-SG') {
     const disabled = resolved.rules?.disable ?? [];
     if (!disabled.includes('COMMON-SPELL-01')) {
       resolved = {

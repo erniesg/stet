@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { Mock } from 'vitest';
 
 vi.mock('stet', () => ({
   check: vi.fn(() => []),
@@ -63,7 +64,7 @@ function mockRect(element: HTMLElement, width = 320, height = 120) {
   });
 }
 
-function createChromeMock() {
+function createChromeMock(configOverrides: Partial<Record<string, unknown>> = {}) {
   const listeners: RuntimeListener[] = [];
   const storageChangeListeners: StorageChangeListener[] = [];
 
@@ -85,6 +86,7 @@ function createChromeMock() {
               enabled: true,
               siteAllowlist: [],
               debounceMs: 25,
+              ...configOverrides,
             },
           });
           return;
@@ -186,6 +188,42 @@ describe('checker live sync', () => {
     };
     expect(settledState.totalIssues).toBe(0);
     expect(settledState.issues).toHaveLength(0);
+  });
+
+  it('keeps common spellcheck enabled for zh-SG even when bt is registered', async () => {
+    const stet = await import('stet');
+    (stet.listPacks as Mock).mockReturnValue([
+      { id: 'common', rules: [] },
+      { id: 'bt', rules: [] },
+    ]);
+
+    createChromeMock({
+      packs: ['common'],
+      language: 'zh-SG',
+      packConfig: { language: 'zh-SG', freThreshold: 30, paragraphCharLimit: 320 },
+      rules: { enable: ['COMMON-SPELL-01'], disable: [] },
+    });
+
+    const { initChecker } = await import('../packages/extension/src/content/checker.js');
+
+    document.body.innerHTML = `<div id="editor" contenteditable="true" aria-label="Draft body"></div>`;
+    const editor = document.getElementById('editor') as HTMLElement;
+    mockRect(editor);
+
+    await initChecker();
+
+    editor.textContent = '我在巴士转换站等巴士';
+    editor.dispatchEvent(new FocusEvent('focus', { bubbles: true }));
+    editor.dispatchEvent(new Event('input', { bubbles: true }));
+    await waitForChecks();
+
+    const configArg = (stet.toCheckOptions as Mock).mock.calls.at(-1)?.[0] as {
+      language: string;
+      rules: { disable: string[] };
+    };
+
+    expect(configArg.language).toBe('zh-SG');
+    expect(configArg.rules.disable).not.toContain('COMMON-SPELL-01');
   });
 
   it('drops stale page issues when the issue-bearing editor is hidden and another editor stays active', async () => {
