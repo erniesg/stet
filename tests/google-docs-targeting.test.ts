@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   discoverHistoryEditables,
   findHistoryEditable,
@@ -8,7 +8,11 @@ import {
   getEditableTarget,
   isGoogleDocsEditableRoot,
 } from '../packages/extension/src/content/editable-target.js';
-import { extractGoogleDocsRenderedText } from '../packages/extension/src/content/google-docs-surface.js';
+import {
+  extractGoogleDocsRenderedText,
+  isGoogleDocsChromeMutation,
+  measureGoogleDocsTextWidth,
+} from '../packages/extension/src/content/google-docs-surface.js';
 
 function setGoogleDocsLocation() {
   Object.defineProperty(window, 'location', {
@@ -148,5 +152,68 @@ describe('google docs targeting', () => {
       reason: 'google-docs-rendered-surface',
     });
     expect(discoverHistoryEditables()).toEqual([root]);
+  });
+
+  it('treats cursor chrome-only docs mutations as ignorable', async () => {
+    setGoogleDocsLocation();
+
+    document.body.innerHTML = `
+      <div id="docs-root" class="kix-appview-editor">
+        <div id="cursor" class="kix-cursor"><div class="kix-cursor-caret"></div></div>
+      </div>
+    `;
+
+    const root = document.getElementById('docs-root') as HTMLElement;
+    const cursor = document.getElementById('cursor') as HTMLElement;
+    const mutations: MutationRecord[] = [];
+    const observer = new MutationObserver((records) => mutations.push(...records));
+    observer.observe(root, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['style'],
+    });
+
+    cursor.innerHTML = '<div class="kix-selection-overlay"></div><div class="kix-cursor-caret"></div>';
+    cursor.style.left = '120px';
+    const overlay = document.createElement('div');
+    overlay.className = 'kix-selection-overlay';
+    root.appendChild(overlay);
+    overlay.remove();
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    observer.disconnect();
+
+    expect(mutations.length).toBeGreaterThan(0);
+    expect(mutations.every((mutation) => isGoogleDocsChromeMutation(mutation))).toBe(true);
+  });
+
+  it('measures docs text without mutating the document when canvas measurement is available', async () => {
+    const source = document.createElement('span');
+    source.textContent = 'Alpha';
+    source.style.font = '400 24px Arial';
+    source.style.letterSpacing = '2px';
+    document.body.appendChild(source);
+
+    const getContextSpy = vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({
+      font: '',
+      measureText: vi.fn(() => ({ width: 40 })),
+    } as unknown as CanvasRenderingContext2D);
+
+    const mutations: MutationRecord[] = [];
+    const observer = new MutationObserver((records) => mutations.push(...records));
+    observer.observe(document.body, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+    });
+
+    const width = measureGoogleDocsTextWidth('Alpha', source);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    observer.disconnect();
+    getContextSpy.mockRestore();
+
+    expect(width).toBe(48);
+    expect(mutations).toHaveLength(0);
   });
 });

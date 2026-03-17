@@ -27,6 +27,7 @@ import {
   computeFieldHistoryLayout,
   type HistoryLayoutRect,
 } from './version-history-layout.js';
+import { isGoogleDocsChromeMutation } from './google-docs-surface.js';
 import {
   resolveHistoryRuntimeConfig,
   type HistoryRuntimeConfig,
@@ -144,6 +145,7 @@ class HistorySession {
 }
 
 let historyManager: VersionHistoryManager | null = null;
+const STET_OWNED_SELECTOR = '.stet-overlay-root, .stet-history-root, .stet-card, .stet-issues-root';
 
 export function initVersionHistory() {
   if (historyManager) {
@@ -738,14 +740,23 @@ export class VersionHistoryManager {
   private static isStetOwnedNode(node: Node): boolean {
     const el = node instanceof Element ? node : node.parentElement;
     if (!el) return false;
-    return !!el.closest('.stet-overlay-root, .stet-history-root, .stet-card');
+    return !!el.closest(STET_OWNED_SELECTOR);
+  }
+
+  private static isStetOwnedMutation(mutation: MutationRecord): boolean {
+    if (VersionHistoryManager.isStetOwnedNode(mutation.target)) return true;
+    const changedNodes = [...mutation.addedNodes, ...mutation.removedNodes];
+    return changedNodes.length > 0 && changedNodes.every((node) => VersionHistoryManager.isStetOwnedNode(node));
   }
 
   private observeDom() {
     this.observer = new MutationObserver((mutations) => {
       this.runGuarded('mutation-observer', () => {
-        // Filter out mutations targeting stet's own DOM to avoid feedback loops
-        const filtered = mutations.filter((m) => !VersionHistoryManager.isStetOwnedNode(m.target));
+        // Filter out stet-owned DOM and Docs cursor chrome to avoid feedback loops
+        // and IME-related cursor churn from triggering layout work.
+        const filtered = mutations.filter((m) =>
+          !VersionHistoryManager.isStetOwnedMutation(m) && !isGoogleDocsChromeMutation(m)
+        );
         if (filtered.length === 0) return;
 
         recordHistoryEventRate('mutation', {

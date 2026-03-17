@@ -4,6 +4,7 @@ const GOOGLE_DOCS_LINE_SELECTOR = '.kix-lineview, .kix-paragraphrenderer';
 const GOOGLE_DOCS_LINE_TEXT_SELECTOR = '.kix-lineview-text-block';
 const GOOGLE_DOCS_WORD_SELECTOR = '.kix-wordhtmlgenerator-word-node';
 const GOOGLE_DOCS_TEXT_RECT_SELECTOR = 'rect[aria-label]';
+const GOOGLE_DOCS_CHROME_SELECTOR = '.kix-cursor, .kix-cursor-caret, .kix-selection-overlay';
 const GOOGLE_DOCS_EVENT_TARGET_SELECTOR = 'iframe.docs-texteventtarget-iframe, .docs-texteventtarget-iframe';
 const GOOGLE_DOCS_EVENT_TARGET_TEXT_SELECTOR = '[contenteditable="true"], [role="textbox"], textarea';
 
@@ -20,6 +21,9 @@ interface GoogleDocsTextFragment {
   text: string;
   rect: DOMRect;
 }
+
+let textMeasureCanvas: HTMLCanvasElement | null = null;
+let textMeasureContext: CanvasRenderingContext2D | null | undefined;
 
 export function isGoogleDocsHost(root: ParentNode | Document = document): boolean {
   const doc = toDocument(root);
@@ -201,14 +205,22 @@ export function buildGoogleDocsWordEntries(
 export function measureGoogleDocsTextWidth(text: string, source: Element): number {
   if (!text) return 0;
 
+  const computed = window.getComputedStyle(source);
+  const ctx = getTextMeasureContext();
+  if (ctx) {
+    ctx.font = getCanvasFont(computed);
+    const baseWidth = ctx.measureText(text).width;
+    const letterSpacing = parseLetterSpacing(computed.letterSpacing);
+    if (letterSpacing === 0 || text.length <= 1) return baseWidth;
+    return baseWidth + (letterSpacing * (text.length - 1));
+  }
+
   const probe = document.createElement('span');
   probe.textContent = text;
   probe.style.position = 'absolute';
   probe.style.left = '-99999px';
   probe.style.top = '-99999px';
   probe.style.whiteSpace = 'pre';
-
-  const computed = window.getComputedStyle(source);
   probe.style.font = computed.font;
   probe.style.fontFamily = computed.fontFamily;
   probe.style.fontSize = computed.fontSize;
@@ -220,6 +232,22 @@ export function measureGoogleDocsTextWidth(text: string, source: Element): numbe
   const width = probe.getBoundingClientRect().width;
   probe.remove();
   return width;
+}
+
+export function isGoogleDocsChromeNode(node: Node): boolean {
+  const el = node instanceof Element ? node : node.parentElement;
+  if (!el) return false;
+  return !!el.closest(GOOGLE_DOCS_CHROME_SELECTOR);
+}
+
+export function isGoogleDocsChromeMutation(mutation: MutationRecord): boolean {
+  const changedNodes = [...mutation.addedNodes, ...mutation.removedNodes];
+  if (changedNodes.length > 0 && changedNodes.every((node) => isGoogleDocsChromeNode(node))) {
+    return true;
+  }
+
+  if (!isGoogleDocsChromeNode(mutation.target)) return false;
+  return changedNodes.every((node) => isGoogleDocsChromeNode(node));
 }
 
 export function normalizeGoogleDocsText(value: string): string {
@@ -271,6 +299,34 @@ function buildWordEntriesFromLineBlocks(
   }
 
   return entries;
+}
+
+function getTextMeasureContext(): CanvasRenderingContext2D | null {
+  if (textMeasureContext !== undefined) return textMeasureContext;
+  textMeasureCanvas = document.createElement('canvas');
+  textMeasureContext = textMeasureCanvas.getContext('2d');
+  return textMeasureContext;
+}
+
+function getCanvasFont(computed: CSSStyleDeclaration): string {
+  if (computed.font && computed.font.trim().length > 0) return computed.font;
+
+  const fontStyle = computed.fontStyle || 'normal';
+  const fontVariant = computed.fontVariant || 'normal';
+  const fontWeight = computed.fontWeight || '400';
+  const fontSize = computed.fontSize || '16px';
+  const lineHeight = computed.lineHeight && computed.lineHeight !== 'normal'
+    ? `/${computed.lineHeight}`
+    : '';
+  const fontFamily = computed.fontFamily || 'sans-serif';
+
+  return `${fontStyle} ${fontVariant} ${fontWeight} ${fontSize}${lineHeight} ${fontFamily}`;
+}
+
+function parseLetterSpacing(value: string): number {
+  if (!value || value === 'normal') return 0;
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : 0;
 }
 
 function sliceGoogleDocsWordRect(
@@ -476,6 +532,6 @@ function isVisibleGoogleDocsElement(element: Element, requireSize = true): boole
 }
 
 function toDocument(root: ParentNode | Document): Document {
-  if (root instanceof Document) return root;
-  return root.ownerDocument ?? document;
+  if (typeof Document !== 'undefined' && root instanceof Document) return root;
+  return root.ownerDocument ?? (root as Document);
 }

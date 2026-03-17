@@ -18,6 +18,7 @@ import {
   getGoogleDocsInputTargetDocument,
   rememberGoogleDocsCaret,
 } from './google-docs-write.js';
+import { isGoogleDocsChromeMutation } from './google-docs-surface.js';
 import {
   discoverHistoryEditables,
   findHistoryEditable,
@@ -84,6 +85,7 @@ const googleDocsCompositionBridges = new WeakMap<HTMLElement, {
   end: EventListener;
   input: EventListener;
 }>();
+const STET_OWNED_SELECTOR = '.stet-overlay-root, .stet-history-root, .stet-card, .stet-issues-root';
 
 interface PopupIssueRecord {
   key: string;
@@ -1316,25 +1318,18 @@ function mirrorTextarea(textarea: HTMLTextAreaElement): HTMLElement | null {
 function isStetOwnedNode(node: Node): boolean {
   const el = node instanceof Element ? node : node.parentElement;
   if (!el) return false;
-  return !!el.closest('.stet-overlay-root, .stet-history-root, .stet-card');
+  return !!el.closest(STET_OWNED_SELECTOR);
 }
 
-function isGoogleDocsChromeNode(node: Node): boolean {
-  const el = node instanceof Element ? node : node.parentElement;
-  if (!el) return false;
-  return !!el.closest('.kix-cursor, .kix-cursor-caret, .kix-selection-overlay');
+function isStetOwnedMutation(mutation: MutationRecord): boolean {
+  if (isStetOwnedNode(mutation.target)) return true;
+  const changedNodes = [...mutation.addedNodes, ...mutation.removedNodes];
+  return changedNodes.length > 0 && changedNodes.every((node) => isStetOwnedNode(node));
 }
 
 function shouldIgnoreMutation(mutation: MutationRecord): boolean {
-  if (isStetOwnedNode(mutation.target)) return true;
-
-  const changedNodes = [...mutation.addedNodes, ...mutation.removedNodes];
-  if (changedNodes.length > 0 && changedNodes.every((node) => isGoogleDocsChromeNode(node))) {
-    return true;
-  }
-
-  if (!isGoogleDocsChromeNode(mutation.target)) return false;
-  return changedNodes.every((node) => isGoogleDocsChromeNode(node));
+  if (isStetOwnedMutation(mutation)) return true;
+  return isGoogleDocsChromeMutation(mutation);
 }
 
 function observeDOM() {
