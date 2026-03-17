@@ -42,7 +42,7 @@ const PROFILE_ALIASES: Record<string, string> = {
 };
 const SUPPORTED_LANGUAGES = ['en-GB', 'en-US', 'zh-SG'] as const;
 const LANGUAGE_OPTIONS: LanguageOption[] = [
-  { id: 'base', label: 'Base', description: 'Use the current newsroom or profile default language.' },
+  { id: 'base', label: 'Auto', description: 'Follow the selected profile language.' },
   { id: 'en-GB', label: 'en-GB', description: 'British English.' },
   { id: 'en-US', label: 'en-US', description: 'American English.' },
   { id: 'zh-SG', label: 'zh-SG', description: 'Singapore Chinese.' },
@@ -101,6 +101,23 @@ export function applyProfileToConfig(
   }
 
   return config;
+}
+
+export function getProfileLanguage(
+  resolvedConfig?: ResolvedStetConfig | null,
+  profileId?: string | null,
+): Language {
+  return applyProfileToConfig(
+    resolvedConfig ? cloneResolvedConfig(resolvedConfig) : cloneResolvedConfig(DEFAULT_RESOLVED_CONFIG),
+    profileId,
+  ).language;
+}
+
+export function resolveLanguageSetting(
+  explicitLanguage: Language | null | undefined,
+  profileLanguage: Language,
+): LanguageOption['id'] {
+  return explicitLanguage && explicitLanguage !== profileLanguage ? explicitLanguage : 'base';
 }
 
 export function detectProfileId(config?: Partial<ResolvedStetConfig> | null): string | null {

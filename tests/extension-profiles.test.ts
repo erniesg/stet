@@ -5,10 +5,12 @@ import {
   applyProfileToConfig,
   detectProfileId,
   getActiveProfileId,
+  getProfileLanguage,
   getProfile,
   isSupportedLanguage,
   listLanguageOptions,
   listProfiles,
+  resolveLanguageSetting,
 } from '../packages/extension/src/storage/profiles.js';
 
 describe('extension profiles', () => {
@@ -73,7 +75,16 @@ describe('extension profiles', () => {
 
   it('lists supported demo language toggles', () => {
     expect(listLanguageOptions().map(option => option.id)).toEqual(['base', 'en-GB', 'en-US', 'zh-SG']);
+    expect(listLanguageOptions()[0]?.label).toBe('Auto');
     expect(isSupportedLanguage('zh-SG')).toBe(true);
     expect(isSupportedLanguage('fr-FR')).toBe(false);
+  });
+
+  it('derives profile language and collapses redundant explicit overrides back to base', () => {
+    expect(getProfileLanguage(DEFAULT_RESOLVED_CONFIG, 'standard')).toBe('en-GB');
+    expect(getProfileLanguage(DEFAULT_RESOLVED_CONFIG, 'sg-chinese')).toBe('zh-SG');
+    expect(resolveLanguageSetting(undefined, 'en-GB')).toBe('base');
+    expect(resolveLanguageSetting('en-GB', 'en-GB')).toBe('base');
+    expect(resolveLanguageSetting('en-US', 'en-GB')).toBe('en-US');
   });
 });

@@ -4,8 +4,10 @@ import { loadCustomTerms, saveCustomTerms } from '../content/dictionary-loader.j
 import { formatSiteAllowlist, parseSiteAllowlistInput } from '../host-access.js';
 import {
   getActiveProfileId,
+  getProfileLanguage,
   listLanguageOptions,
   listProfiles,
+  resolveLanguageSetting,
 } from '../storage/profiles.js';
 
 const profiles = listProfiles();
@@ -15,18 +17,37 @@ type LanguageSetting = typeof languageOptions[number]['id'];
 function Options() {
   const [profileId, setProfileId] = useState<string>('standard');
   const [language, setLanguage] = useState<LanguageSetting>('base');
+  const [profileLanguage, setProfileLanguage] = useState<'en-GB' | 'en-US' | 'zh-SG'>('en-GB');
   const [siteAllowlist, setSiteAllowlist] = useState('');
   const [customTerms, setCustomTerms] = useState('');
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    chrome.runtime.sendMessage({ type: 'GET_RAW_SETTINGS' }, async (resp) => {
-      setProfileId(getActiveProfileId(resp?.userOverrides?.profileId, resp?.resolvedConfig));
-      setLanguage(resp?.userOverrides?.language ?? 'base');
+  const loadConfigState = () => {
+    chrome.runtime.sendMessage({ type: 'GET_RAW_SETTINGS' }, (resp) => {
+      const nextProfileId = getActiveProfileId(resp?.userOverrides?.profileId, resp?.resolvedConfig);
+      const nextProfileLanguage = getProfileLanguage(resp?.resolvedConfig ?? null, nextProfileId);
+      const nextLanguage = resolveLanguageSetting(resp?.userOverrides?.language, nextProfileLanguage);
+
+      setProfileId(nextProfileId);
+      setProfileLanguage(nextProfileLanguage);
+      setLanguage(nextLanguage);
       setSiteAllowlist(formatSiteAllowlist(resp?.userOverrides?.siteAllowlist));
-      setCustomTerms((await loadCustomTerms()).join('\n'));
       setLoading(false);
+
+      if (resp?.userOverrides?.language && nextLanguage === 'base') {
+        chrome.runtime.sendMessage({
+          type: 'UPDATE_USER_OVERRIDES',
+          overrides: { language: undefined },
+        });
+      }
+    });
+  };
+
+  useEffect(() => {
+    loadConfigState();
+    loadCustomTerms().then((terms) => {
+      setCustomTerms(terms.join('\n'));
     });
   }, []);
 
@@ -40,20 +61,24 @@ function Options() {
       type: 'APPLY_PROFILE',
       profileId: nextProfileId,
     }, () => {
-      setProfileId(nextProfileId);
+      loadConfigState();
       showStatus(`Applied ${profiles.find(profile => profile.id === nextProfileId)?.name ?? nextProfileId}`);
     });
   };
 
   const applyLanguage = (nextLanguage: LanguageSetting) => {
+    const explicitLanguage = nextLanguage === 'base' || nextLanguage === profileLanguage
+      ? undefined
+      : nextLanguage;
+
     chrome.runtime.sendMessage({
       type: 'UPDATE_USER_OVERRIDES',
       overrides: {
-        language: nextLanguage === 'base' ? undefined : nextLanguage,
+        language: explicitLanguage,
       },
     }, () => {
-      setLanguage(nextLanguage);
-      showStatus(nextLanguage === 'base' ? 'Using profile language' : `Forced ${nextLanguage}`);
+      setLanguage(resolveLanguageSetting(explicitLanguage, profileLanguage));
+      showStatus(explicitLanguage ? `Forced ${explicitLanguage}` : `Following profile language (${profileLanguage})`);
     });
   };
 
@@ -135,7 +160,7 @@ function Options() {
       <section style={{ border: '1px solid #e5e7eb', borderRadius: '16px', padding: '18px', background: '#fff', marginBottom: '18px' }}>
         <h2 style={{ marginTop: 0 }}>Language</h2>
         <p style={{ color: '#4b5563', lineHeight: 1.5 }}>
-          Override the active language for demos. `Base` follows the selected profile and current newsroom config.
+          Override the active language for demos. <code>Auto</code> follows the selected profile and is currently <code>{profileLanguage}</code>.
         </p>
         <div style={{ display: 'grid', gap: '12px' }}>
           {languageOptions.map((option) => {

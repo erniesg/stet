@@ -1,13 +1,16 @@
 import { render } from 'preact';
 import { useEffect, useRef, useState } from 'preact/hooks';
+import type { Language } from 'stet';
 import { diffText } from '../content/version-history-diff.js';
 import { createInlineDiff, createDiffStat } from '../shared/diff-renderer.js';
 import type { EditableHistoryRecord, VersionSnapshot } from '../content/version-history-core.js';
 import { normalizeSiteAllowlist } from '../host-access.js';
 import {
   getActiveProfileId,
+  getProfileLanguage,
   listLanguageOptions,
   listProfiles,
+  resolveLanguageSetting,
 } from '../storage/profiles.js';
 import { getHistoryRefreshTarget } from './popup-sync.js';
 
@@ -104,6 +107,7 @@ function Popup() {
   const [role, setRole] = useState('journalist');
   const [profileId, setProfileId] = useState('standard');
   const [languageSetting, setLanguageSetting] = useState<LanguageSetting>('base');
+  const [profileLanguage, setProfileLanguage] = useState<Language>('en-GB');
   const [effectiveLanguage, setEffectiveLanguage] = useState('en-GB');
   const [loading, setLoading] = useState(true);
   const [activeTabId, setActiveTabId] = useState<number | null>(null);
@@ -152,9 +156,21 @@ function Popup() {
     });
 
     chrome.runtime.sendMessage({ type: 'GET_RAW_SETTINGS' }, (resp) => {
+      const nextProfileId = getActiveProfileId(resp?.userOverrides?.profileId, resp?.resolvedConfig);
+      const nextProfileLanguage = getProfileLanguage(resp?.resolvedConfig ?? null, nextProfileId);
+      const nextLanguageSetting = resolveLanguageSetting(resp?.userOverrides?.language, nextProfileLanguage);
+
       setSiteAllowlist(normalizeSiteAllowlist(resp?.userOverrides?.siteAllowlist));
-      setProfileId(getActiveProfileId(resp?.userOverrides?.profileId, resp?.resolvedConfig));
-      setLanguageSetting(resp?.userOverrides?.language ?? 'base');
+      setProfileId(nextProfileId);
+      setProfileLanguage(nextProfileLanguage);
+      setLanguageSetting(nextLanguageSetting);
+
+      if (resp?.userOverrides?.language && nextLanguageSetting === 'base') {
+        chrome.runtime.sendMessage({
+          type: 'UPDATE_USER_OVERRIDES',
+          overrides: { language: undefined },
+        });
+      }
     });
   };
 
@@ -304,11 +320,15 @@ function Popup() {
   };
 
   const changeLanguage = (nextLanguage: LanguageSetting) => {
-    setLanguageSetting(nextLanguage);
+    const explicitLanguage = nextLanguage === 'base' || nextLanguage === profileLanguage
+      ? undefined
+      : nextLanguage;
+
+    setLanguageSetting(resolveLanguageSetting(explicitLanguage, profileLanguage));
     chrome.runtime.sendMessage({
       type: 'UPDATE_USER_OVERRIDES',
       overrides: {
-        language: nextLanguage === 'base' ? undefined : nextLanguage,
+        language: explicitLanguage,
       },
     }, () => {
       reloadConfigAndRefresh();
@@ -677,8 +697,8 @@ function Popup() {
             </div>
             <span style={styles.roleDescription}>
               {languageSetting === 'base'
-                ? `Using ${effectiveLanguage} from the selected profile and newsroom config.`
-                : `${activeLanguageOption.description} Overrides the selected profile until you switch back to Base.`}
+                ? `Following ${activeProfile.name}: ${profileLanguage}.`
+                : `${activeLanguageOption.description} Overrides ${activeProfile.name} until you switch back to Auto.`}
             </span>
           </div>
 
