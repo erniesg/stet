@@ -30,7 +30,7 @@ import {
   replaceEditableRange,
   replaceEditableText,
 } from './editable-target.js';
-import { IssuePanelManager } from './issue-panel.js';
+// import { IssuePanelManager } from './issue-panel.js';
 import { resolveIssueApplyRange } from './issue-range.js';
 import { getReplacementText } from './replacement-text.js';
 import {
@@ -77,7 +77,7 @@ const CHECKER_MARK_SELECTOR = 'stet-mark';
 const INPUT_MUTATION_SUPPRESS_MS = 750;
 const recentInputAt = new WeakMap<HTMLElement, number>();
 const DISCOVERY_ATTRIBUTE_FILTER = ['style', 'class', 'hidden', 'aria-hidden', 'contenteditable', 'role'];
-let issuePanel: IssuePanelManager | null = null;
+// let issuePanel: IssuePanelManager | null = null;
 const composingEditables = new WeakSet<HTMLElement>();
 const googleDocsCompositionBridges = new WeakMap<HTMLElement, {
   doc: Document;
@@ -473,7 +473,6 @@ function cleanupTrackedEditable(element: HTMLElement) {
   managers.delete(element);
   trackedEditables.delete(element);
   latestIssues.delete(element);
-  issuePanel?.removeElement(element);
 }
 
 function getResolvedEditableElement(element: HTMLElement): HTMLElement | null {
@@ -551,11 +550,6 @@ function getPageIssueCount(): number {
 }
 
 function syncPageState() {
-  const issuePanelElement = getPreferredIssuePanelElement();
-  if (issuePanel || issuePanelElement) {
-    getIssuePanel().setActiveElement(issuePanelElement);
-  }
-
   try {
     chrome.runtime.sendMessage({
       type: 'SYNC_PAGE_ISSUES',
@@ -575,12 +569,7 @@ function getEditorCount(): number {
   return total;
 }
 
-function getIssuePanel(): IssuePanelManager {
-  if (!issuePanel) {
-    issuePanel = new IssuePanelManager(applySelectedFixes);
-  }
-  return issuePanel;
-}
+// Issue panel removed — popup shows issues instead.
 
 function getTrackedEditable(start: EventTarget | null): HTMLElement | null {
   const editable = findHistoryEditable(start);
@@ -673,22 +662,8 @@ function getPreferredPopupElement(): HTMLElement | null {
   return null;
 }
 
-function getPreferredIssuePanelElement(): HTMLElement | null {
-  const activeCheckElement = getActiveCheckElement();
-  if (!activeCheckElement) return null;
-
-  const target = getEditableTarget(activeCheckElement);
-  return target?.kind === 'textarea' ? activeCheckElement : null;
-}
-
-function syncIssuePanelElementIssues(element: HTMLElement, issues: Issue[]) {
-  const target = getEditableTarget(element);
-  if (target?.kind === 'textarea') {
-    getIssuePanel().updateIssues(element, issues);
-    return;
-  }
-
-  issuePanel?.removeElement(element);
+function syncIssuePanelElementIssues(_element: HTMLElement, _issues: Issue[]) {
+  // Issue panel disabled — popup shows issues instead.
 }
 
 function serializeIssue(issue: Issue): PopupIssueRecord {

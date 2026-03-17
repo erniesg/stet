@@ -160,6 +160,6 @@ export function toCheckOptions(config: ResolvedStetConfig): import('./types.js')
     role: config.role,
     enabledRules: config.rules.enable.length > 0 ? config.rules.enable : undefined,
     disabledRules: config.rules.disable.length > 0 ? config.rules.disable : undefined,
-    configOverrides: config.packConfig,
+    configOverrides: { ...config.packConfig, language: config.language },
   };
 }

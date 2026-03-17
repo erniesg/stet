@@ -655,51 +655,23 @@ function Popup() {
           </div>
 
           <div style={styles.section}>
-            <span style={styles.sectionLabel}>Profile</span>
-            <div style={styles.roleGroup}>
-              {PROFILES.map((profile) => (
-                <button
-                  key={profile.id}
-                  onClick={() => changeProfile(profile.id)}
-                  style={{
-                    ...styles.roleBtn,
-                    background: profileId === profile.id ? COLORS.primary : '#fff',
-                    color: profileId === profile.id ? '#fff' : '#374151',
-                    borderColor: profileId === profile.id ? COLORS.primary : COLORS.border,
-                  }}
-                >
-                  <span style={{ fontWeight: '500', fontSize: '12px' }}>{profile.name}</span>
-                </button>
-              ))}
-            </div>
-            <span style={styles.roleDescription}>
-              {activeProfile.description}
-            </span>
-          </div>
-
-          <div style={styles.section}>
             <span style={styles.sectionLabel}>Language</span>
             <div style={styles.roleGroup}>
-              {LANGUAGE_OPTIONS.map((option) => (
+              {LANGUAGE_OPTIONS.filter((o) => o.id !== 'base').map((option) => (
                 <button
                   key={option.id}
                   onClick={() => changeLanguage(option.id)}
                   style={{
                     ...styles.roleBtn,
-                    background: languageSetting === option.id ? COLORS.primary : '#fff',
-                    color: languageSetting === option.id ? '#fff' : '#374151',
-                    borderColor: languageSetting === option.id ? COLORS.primary : COLORS.border,
+                    background: effectiveLanguage === option.id ? COLORS.primary : '#fff',
+                    color: effectiveLanguage === option.id ? '#fff' : '#374151',
+                    borderColor: effectiveLanguage === option.id ? COLORS.primary : COLORS.border,
                   }}
                 >
                   <span style={{ fontWeight: '500', fontSize: '12px' }}>{option.label}</span>
                 </button>
               ))}
             </div>
-            <span style={styles.roleDescription}>
-              {languageSetting === 'base'
-                ? `Following ${activeProfile.name}: ${profileLanguage}.`
-                : `${activeLanguageOption.description} Overrides ${activeProfile.name} until you switch back to Auto.`}
-            </span>
           </div>
 
           <div style={styles.section}>
