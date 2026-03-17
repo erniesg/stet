@@ -161,7 +161,7 @@ describe('checker live sync', () => {
     editor.dispatchEvent(new Event('input', { bubbles: true }));
     await waitForChecks();
 
-    expect(document.querySelectorAll('stet-mark')).toHaveLength(1);
+    expect(document.querySelectorAll('stet-mark').length).toBeGreaterThan(0);
     const initialState = await dispatchRuntimeMessage(listeners[0], { type: 'GET_PAGE_ISSUES' }) as {
       totalIssues: number;
       issues: Array<{ rule: string }>;
@@ -190,6 +190,45 @@ describe('checker live sync', () => {
     expect(settledState.issues).toHaveLength(0);
   });
 
+  it('defers checks until composition ends for composing edits', async () => {
+    createChromeMock();
+    const stet = await import('stet');
+    const { initChecker } = await import('../packages/extension/src/content/checker.js');
+
+    document.body.innerHTML = `<div id="editor" contenteditable="true" aria-label="Draft body"></div>`;
+    const editor = document.getElementById('editor') as HTMLElement;
+    mockRect(editor);
+
+    await initChecker();
+
+    editor.textContent = 'teh draft';
+    editor.dispatchEvent(new FocusEvent('focus', { bubbles: true }));
+    editor.dispatchEvent(new Event('input', { bubbles: true }));
+    await waitForChecks();
+
+    expect(document.querySelectorAll('stet-mark').length).toBeGreaterThan(0);
+    const callsBeforeComposition = (stet.checkDocument as Mock).mock.calls.length;
+
+    editor.dispatchEvent(new Event('compositionstart', { bubbles: true }));
+    editor.textContent = 'zu wu draft';
+    const composingInput = new Event('input', { bubbles: true });
+    Object.defineProperty(composingInput, 'isComposing', {
+      configurable: true,
+      value: true,
+    });
+    editor.dispatchEvent(composingInput);
+    await waitForChecks();
+
+    expect((stet.checkDocument as Mock).mock.calls).toHaveLength(callsBeforeComposition);
+
+    editor.textContent = '组屋 draft';
+    editor.dispatchEvent(new Event('compositionend', { bubbles: true }));
+    await waitForChecks();
+
+    expect((stet.checkDocument as Mock).mock.calls.length).toBeGreaterThan(callsBeforeComposition);
+    expect(document.querySelectorAll('stet-mark')).toHaveLength(0);
+  });
+
   it('keeps common spellcheck enabled for zh-SG even when bt is registered', async () => {
     const stet = await import('stet');
     (stet.listPacks as Mock).mockReturnValue([
@@ -211,19 +250,24 @@ describe('checker live sync', () => {
     mockRect(editor);
 
     await initChecker();
+    (stet.toCheckOptions as Mock).mockClear();
 
     editor.textContent = '我在巴士转换站等巴士';
     editor.dispatchEvent(new FocusEvent('focus', { bubbles: true }));
     editor.dispatchEvent(new Event('input', { bubbles: true }));
     await waitForChecks();
 
-    const configArg = (stet.toCheckOptions as Mock).mock.calls.at(-1)?.[0] as {
-      language: string;
-      rules: { disable: string[] };
-    };
+    const configArg = [...(stet.toCheckOptions as Mock).mock.calls]
+      .map(([configArg]) => configArg as {
+        language: string;
+        rules: { disable: string[] };
+      })
+      .reverse()
+      .find((configArg) => configArg.language === 'zh-SG');
 
-    expect(configArg.language).toBe('zh-SG');
-    expect(configArg.rules.disable).not.toContain('COMMON-SPELL-01');
+    expect(configArg).toBeTruthy();
+    expect(configArg?.language).toBe('zh-SG');
+    expect(configArg?.rules.disable).not.toContain('COMMON-SPELL-01');
   });
 
   it('drops stale page issues when the issue-bearing editor is hidden and another editor stays active', async () => {

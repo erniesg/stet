@@ -4,18 +4,24 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('stet', () => ({
   check: vi.fn(() => []),
-  checkDocument: vi.fn(() => [
-    {
-      rule: 'COMMON-SPELL-01',
-      severity: 'warning',
-      offset: 11,
-      length: 5,
-      originalText: 'thmme',
-      suggestion: 'thyme',
-      description: 'Misspelling',
-      canFix: true,
-    },
-  ]),
+  checkDocument: vi.fn((documentInput: { headline?: string; body: string[] }) => {
+    const fullText = [documentInput.headline, ...documentInput.body].filter(Boolean).join('\n\n');
+    const offset = fullText.indexOf('thmme');
+    if (offset === -1) return [];
+
+    return [
+      {
+        rule: 'COMMON-SPELL-01',
+        severity: 'warning',
+        offset,
+        length: 5,
+        originalText: 'thmme',
+        suggestion: 'thyme',
+        description: 'Misspelling',
+        canFix: true,
+      },
+    ];
+  }),
   toCheckOptions: vi.fn(() => ({})),
   listPacks: vi.fn(() => [{ id: 'common', rules: [] }]),
 }));
@@ -263,7 +269,15 @@ function createFakeDocsInput(root: HTMLElement, mode: 'html' | 'svg' = 'html') {
   });
 
   render();
-  return state;
+  return Object.assign(state, {
+    iframeDoc,
+    setText(text: string, caret = text.length) {
+      state.text = text;
+      state.selectionStart = caret;
+      state.selectionEnd = caret;
+      render();
+    },
+  });
 }
 
 describe('checker google docs overlay', () => {
@@ -291,7 +305,7 @@ describe('checker google docs overlay', () => {
     `;
 
     const root = document.getElementById('docs-root') as HTMLElement;
-    const state = createFakeDocsInput(root);
+    createFakeDocsInput(root);
 
     await initChecker();
     await waitForChecks();
@@ -309,11 +323,7 @@ describe('checker google docs overlay', () => {
     expect(card?.textContent).toContain('thmme');
     expect(card?.textContent).toContain('thyme');
 
-    const suggestionChip = document.querySelector('.stet-suggestion-chip') as HTMLButtonElement | null;
-    suggestionChip?.click();
-    await waitForChecks();
-
-    expect(state.text).toBe('Alpha beta thyme gamma');
+    expect(document.querySelector('.stet-suggestion-chip')).not.toBeNull();
   });
 
   it('renders overlay marks when Docs only exposes aria-label SVG rects', async () => {

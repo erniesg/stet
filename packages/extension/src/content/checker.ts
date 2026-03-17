@@ -15,6 +15,7 @@ import { AnnotationManager, isCardOpen } from './annotation-manager.js';
 import { loadDictionary, loadCustomTerms } from './dictionary-loader.js';
 import {
   applyGoogleDocsReplacement,
+  getGoogleDocsInputTargetDocument,
   rememberGoogleDocsCaret,
 } from './google-docs-write.js';
 import {
@@ -70,11 +71,19 @@ let dictionaryLoadPromise: Promise<string[]> | null = null;
 let historyTrackingRegistered = false;
 let historyFeatureEnabled = true;
 let storageChangeListenerRegistered = false;
+let compositionTrackingRegistered = false;
 const CHECKER_MARK_SELECTOR = 'stet-mark';
 const INPUT_MUTATION_SUPPRESS_MS = 750;
 const recentInputAt = new WeakMap<HTMLElement, number>();
 const DISCOVERY_ATTRIBUTE_FILTER = ['style', 'class', 'hidden', 'aria-hidden', 'contenteditable', 'role'];
 let issuePanel: IssuePanelManager | null = null;
+const composingEditables = new WeakSet<HTMLElement>();
+const googleDocsCompositionBridges = new WeakMap<HTMLElement, {
+  doc: Document;
+  start: EventListener;
+  end: EventListener;
+  input: EventListener;
+}>();
 
 interface PopupIssueRecord {
   key: string;
@@ -308,8 +317,41 @@ function clearVisibleIssuesForPendingEdit(element: HTMLElement) {
   publishElementIssues(element, []);
 }
 
+function clearScheduledCheck(element: HTMLElement) {
+  const existing = timers.get(element);
+  if (existing) clearTimeout(existing);
+  timers.delete(element);
+}
+
+function isComposingEvent(event: Event): boolean {
+  return 'isComposing' in event && Boolean((event as Event & { isComposing?: boolean }).isComposing);
+}
+
+function isEditableComposing(element: HTMLElement): boolean {
+  return composingEditables.has(element);
+}
+
+function markCompositionStart(element: HTMLElement) {
+  if (composingEditables.has(element)) return;
+
+  composingEditables.add(element);
+  recentInputAt.set(element, getNow());
+  clearScheduledCheck(element);
+  recordHistoryEventRate('checker:composition-start', getCheckerElementLogData(element));
+}
+
+function markCompositionEnd(element: HTMLElement) {
+  if (!composingEditables.has(element)) return;
+
+  composingEditables.delete(element);
+  recentInputAt.set(element, getNow());
+  clearVisibleIssuesForPendingEdit(element);
+  recordHistoryEventRate('checker:composition-end', getCheckerElementLogData(element));
+  scheduleCheck(element);
+}
+
 function runCheckAndAnnotate(element: HTMLElement) {
-  if (selfMutating) return;
+  if (selfMutating || isEditableComposing(element)) return;
 
   if (isCardOpen()) {
     scheduleCheck(element);
@@ -392,9 +434,8 @@ function runCheckAndAnnotate(element: HTMLElement) {
 }
 
 function scheduleCheck(element: HTMLElement) {
-  if (selfMutating) return;
-  const existing = timers.get(element);
-  if (existing) clearTimeout(existing);
+  if (selfMutating || isEditableComposing(element)) return;
+  clearScheduledCheck(element);
   const delay = config?.debounceMs ?? 800;
   recordHistoryEventRate('checker:schedule', {
     ...getCheckerElementLogData(element),
@@ -410,8 +451,7 @@ function scheduleCheck(element: HTMLElement) {
 }
 
 function scheduleInitialCheck(element: HTMLElement, delay = 300) {
-  const existing = timers.get(element);
-  if (existing) clearTimeout(existing);
+  clearScheduledCheck(element);
 
   const timer = setTimeout(() => {
     if (timers.get(element) === timer) {
@@ -424,14 +464,14 @@ function scheduleInitialCheck(element: HTMLElement, delay = 300) {
 }
 
 function cleanupTrackedEditable(element: HTMLElement) {
+  clearScheduledCheck(element);
+  composingEditables.delete(element);
+  unregisterGoogleDocsCompositionBridge(element);
   managers.get(element)?.destroy();
   managers.delete(element);
   trackedEditables.delete(element);
   latestIssues.delete(element);
   getIssuePanel().removeElement(element);
-  const timer = timers.get(element);
-  if (timer) clearTimeout(timer);
-  timers.delete(element);
 }
 
 function getResolvedEditableElement(element: HTMLElement): HTMLElement | null {
@@ -973,6 +1013,69 @@ function registerLateEditableDiscovery() {
   }, true);
 }
 
+function registerCompositionTracking() {
+  if (compositionTrackingRegistered) return;
+  compositionTrackingRegistered = true;
+
+  document.addEventListener('compositionstart', (event) => {
+    const editable = getTrackableEditable(event.target);
+    if (!editable) return;
+
+    attachListener(editable);
+    activeElement = editable;
+    markCompositionStart(editable);
+  }, true);
+
+  document.addEventListener('compositionend', (event) => {
+    const editable = getTrackableEditable(event.target);
+    if (!editable) return;
+
+    attachListener(editable);
+    markCompositionEnd(editable);
+  }, true);
+}
+
+function registerGoogleDocsCompositionBridge(element: HTMLElement) {
+  if (!isGoogleDocsEditableRoot(element) || googleDocsCompositionBridges.has(element)) return;
+
+  const inputDoc = getGoogleDocsInputTargetDocument(element.ownerDocument ?? document);
+  if (!inputDoc) return;
+
+  const handleStart: EventListener = () => {
+    activeElement = element;
+    markCompositionStart(element);
+  };
+  const handleEnd: EventListener = () => {
+    markCompositionEnd(element);
+  };
+  const handleInput: EventListener = (event) => {
+    recentInputAt.set(element, getNow());
+    if (!isComposingEvent(event)) return;
+    activeElement = element;
+    markCompositionStart(element);
+  };
+
+  inputDoc.addEventListener('compositionstart', handleStart, true);
+  inputDoc.addEventListener('compositionend', handleEnd, true);
+  inputDoc.addEventListener('input', handleInput, true);
+  googleDocsCompositionBridges.set(element, {
+    doc: inputDoc,
+    start: handleStart,
+    end: handleEnd,
+    input: handleInput,
+  });
+}
+
+function unregisterGoogleDocsCompositionBridge(element: HTMLElement) {
+  const bridge = googleDocsCompositionBridges.get(element);
+  if (!bridge) return;
+
+  bridge.doc.removeEventListener('compositionstart', bridge.start, true);
+  bridge.doc.removeEventListener('compositionend', bridge.end, true);
+  bridge.doc.removeEventListener('input', bridge.input, true);
+  googleDocsCompositionBridges.delete(element);
+}
+
 function registerRuntimeHandlers() {
   if (runtimeHandlersRegistered) return;
   runtimeHandlersRegistered = true;
@@ -1077,6 +1180,7 @@ function refreshAllChecks() {
     const target = getResolvedEditableElement(element);
     if (!target) continue;
     attachListener(target);
+    if (isEditableComposing(target)) continue;
     runCheckAndAnnotate(target);
   }
 }
@@ -1101,14 +1205,25 @@ function attachListener(el: HTMLElement) {
   trackedEditables.add(el);
   // Disable browser spellcheck — stet handles it
   el.spellcheck = false;
+  registerGoogleDocsCompositionBridge(el);
   if (getAnnotationSupport(el).mode !== 'panel') {
     managers.set(el, createAnnotationManager(el));
   }
   logHistoryEvent('checker:attach', getCheckerElementLogData(el));
 
-  el.addEventListener('input', () => {
+  el.addEventListener('input', (event) => {
     if (selfMutating) return;
     recentInputAt.set(el, getNow());
+    if (isComposingEvent(event)) {
+      markCompositionStart(el);
+      recordHistoryEventRate('checker:input-composing', getCheckerElementLogData(el));
+      return;
+    }
+    if (isEditableComposing(el)) {
+      recordHistoryEventRate('checker:input-while-composing', getCheckerElementLogData(el));
+      return;
+    }
+    clearVisibleIssuesForPendingEdit(el);
     recordHistoryEventRate('checker:input', getCheckerElementLogData(el));
     scheduleCheck(el);
   });
@@ -1279,6 +1394,10 @@ function observeDOM() {
 
     changedEditables.forEach((editable) => {
       if (!editable.isConnected) return;
+      if (isEditableComposing(editable)) {
+        recordHistoryEventRate('checker:mutation-skip-composing', getCheckerElementLogData(editable));
+        return;
+      }
 
       const lastInputAt = recentInputAt.get(editable);
       if (typeof lastInputAt === 'number' && getNow() - lastInputAt < INPUT_MUTATION_SUPPRESS_MS) {
@@ -1434,6 +1553,7 @@ export async function initChecker(onDictionaryLoaded?: OnDictionaryLoaded) {
   discoverEditables();
   observeDOM();
   registerLateEditableDiscovery();
+  registerCompositionTracking();
   registerRuntimeHandlers();
   registerStorageChangeListener(onDictionaryLoaded);
   if (historyFeatureEnabled) {

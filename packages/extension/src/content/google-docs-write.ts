@@ -16,6 +16,17 @@ type GoogleDocsInputTarget = Document | HTMLElement;
 
 const rememberedCaretOffsets = new WeakMap<HTMLElement, number>();
 
+export function getGoogleDocsInputTargetDocument(doc: Document): Document | null {
+  const candidate = doc.querySelector<HTMLElement | HTMLIFrameElement>(GOOGLE_DOCS_EVENT_TARGET_SELECTOR);
+  if (!candidate) return null;
+
+  if (candidate instanceof HTMLIFrameElement) {
+    return candidate.contentDocument ?? null;
+  }
+
+  return candidate.ownerDocument ?? doc;
+}
+
 export function rememberGoogleDocsCaret(root: HTMLElement, fullText = extractGoogleDocsRenderedText(root)): number | null {
   const offset = getGoogleDocsCaretOffset(root, fullText);
   if (offset !== null) {
