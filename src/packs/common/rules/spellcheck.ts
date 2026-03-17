@@ -86,35 +86,89 @@ function checkHanSpelling(text: string): Issue[] {
   for (const match of text.matchAll(HAN_RUN_PATTERN)) {
     const originalRun = match[0];
     const runOffset = match.index ?? 0;
+
+    // First pass: greedy longest-match segmentation
+    const segments: Array<{ start: number; length: number; matched: number }> = [];
     let cursor = 0;
 
     while (cursor < originalRun.length) {
       const matchedLength = findLongestHanMatch(originalRun, cursor);
-      if (matchedLength > 0) {
+      segments.push({ start: cursor, length: 1, matched: matchedLength });
+      if (matchedLength > 1) {
         cursor += matchedLength;
+      } else {
+        cursor += 1;
+      }
+    }
+
+    // Flag characters that only matched at length 1 (single-char fallback).
+    // A run of consecutive single-char matches suggests a broken phrase —
+    // likely a pinyin homophone substitution.
+    // Skip isolated single chars (particles, punctuation-adjacent) by requiring
+    // at least 2 consecutive single-char-only matches, OR a single char that
+    // is not in the dictionary at all.
+    let i = 0;
+    while (i < segments.length) {
+      const seg = segments[i];
+
+      // Character not in dict at all — always flag
+      if (seg.matched === 0) {
+        const issueStart = seg.start;
+        let end = seg.start + 1;
+        while (i + 1 < segments.length && segments[i + 1].matched === 0) {
+          i += 1;
+          end = segments[i].start + 1;
+        }
+        const original = originalRun.slice(issueStart, end);
+        issues.push({
+          rule: 'COMMON-SPELL-01',
+          name: 'Possible spelling issue',
+          category: 'spelling',
+          severity: 'warning',
+          originalText: original,
+          suggestion: null,
+          description: `Possible spelling issue: "${original}" is not in the loaded dictionary.`,
+          offset: runOffset + issueStart,
+          length: original.length,
+          canFix: false,
+        });
+        i += 1;
         continue;
       }
 
-      const issueStart = cursor;
-      cursor += 1;
-
-      while (cursor < originalRun.length && findLongestHanMatch(originalRun, cursor) === 0) {
-        cursor += 1;
+      // Matched a multi-char phrase — fine
+      if (seg.matched > 1) {
+        i += 1;
+        continue;
       }
 
-      const original = originalRun.slice(issueStart, cursor);
-      issues.push({
-        rule: 'COMMON-SPELL-01',
-        name: 'Possible spelling issue',
-        category: 'spelling',
-        severity: 'warning',
-        originalText: original,
-        suggestion: null,
-        description: `Possible spelling issue: "${original}" is not in the loaded dictionary.`,
-        offset: runOffset + issueStart,
-        length: original.length,
-        canFix: false,
-      });
+      // Single-char match — check if it's part of a suspicious run.
+      // Count consecutive single-char-only segments.
+      const runStart = i;
+      while (i < segments.length && segments[i].matched === 1) {
+        i += 1;
+      }
+      const runLen = i - runStart;
+
+      // 3+ consecutive single-char matches with no phrase found = suspicious
+      if (runLen >= 3) {
+        const first = segments[runStart];
+        const last = segments[i - 1];
+        const original = originalRun.slice(first.start, last.start + 1);
+        issues.push({
+          rule: 'COMMON-SPELL-01',
+          name: 'Possible spelling issue',
+          category: 'spelling',
+          severity: 'info',
+          originalText: original,
+          suggestion: null,
+          description: `No known phrase found for "${original}" — possible wrong character from pinyin input.`,
+          offset: runOffset + first.start,
+          length: original.length,
+          canFix: false,
+        });
+      }
+      // Single isolated char between phrases — likely a particle, skip
     }
   }
 
