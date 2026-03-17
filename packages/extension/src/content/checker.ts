@@ -1189,17 +1189,6 @@ function attachListener(el: HTMLElement) {
     renderDeferredAnnotations(el);
   });
 
-  el.addEventListener('keydown', () => {
-    // Clear marks on any keystroke so caret movement isn't disrupted
-    if (selfMutating) return;
-    const mgr = managers.get(el);
-    if (mgr && mgr.getRenderedMarkCount() > 0) {
-      selfMutating = true;
-      mgr.clear();
-      window.setTimeout(() => { selfMutating = false; }, 0);
-    }
-  });
-
   el.addEventListener('mouseup', () => {
     if (isGoogleDocsEditableRoot(el)) {
       void rememberGoogleDocsCaret(el);
