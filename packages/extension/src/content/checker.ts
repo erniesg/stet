@@ -306,6 +306,14 @@ function clearVisibleIssuesForPendingEdit(element: HTMLElement) {
   publishElementIssues(element, []);
 }
 
+const ANNOTATION_IDLE_MS = 300;
+
+function isElementActivelyEdited(element: HTMLElement): boolean {
+  const lastInput = recentInputAt.get(element);
+  if (!lastInput) return false;
+  return getNow() - lastInput < ANNOTATION_IDLE_MS;
+}
+
 function runCheckAndAnnotate(element: HTMLElement) {
   if (selfMutating) return;
 
@@ -353,9 +361,24 @@ function runCheckAndAnnotate(element: HTMLElement) {
     console.log('[stet] No issues found');
   }
 
+  // Always publish issues to popup regardless of annotation rendering
+  syncPageState();
+
   const annotationSupport = getAnnotationSupport(element);
   const canRenderAnnotations = annotationSupport.mode !== 'panel';
   const annotationMode = annotationSupport.mode === 'overlay' ? 'overlay' : 'inline';
+
+  // Defer inline annotation while user is actively editing to avoid cursor disruption.
+  // Marks will render once the user idles for ANNOTATION_IDLE_MS or blurs the element.
+  if (annotationMode === 'inline' && isElementActivelyEdited(element)) {
+    logHistoryEvent('checker:annotations-deferred', {
+      ...getCheckerElementLogData(element),
+      issueCount: issues.length,
+      reason: 'active-editing',
+    });
+    scheduleAnnotationRender(element);
+    return;
+  }
 
   logHistoryEvent('checker:pre-annotate', {
     ...getCheckerElementLogData(element),
@@ -389,7 +412,42 @@ function runCheckAndAnnotate(element: HTMLElement) {
       ?? (element.isContentEditable ? element.querySelectorAll(CHECKER_MARK_SELECTOR).length : 0),
     elapsedMs: getElapsedMs(startedAt),
   });
-  syncPageState();
+}
+
+const annotationTimers = new Map<HTMLElement, ReturnType<typeof setTimeout>>();
+
+function scheduleAnnotationRender(element: HTMLElement) {
+  const existing = annotationTimers.get(element);
+  if (existing) clearTimeout(existing);
+  const timer = setTimeout(() => {
+    annotationTimers.delete(element);
+    renderDeferredAnnotations(element);
+  }, ANNOTATION_IDLE_MS);
+  annotationTimers.set(element, timer);
+}
+
+function renderDeferredAnnotations(element: HTMLElement) {
+  if (!element.isConnected) return;
+  if (isElementActivelyEdited(element)) {
+    scheduleAnnotationRender(element);
+    return;
+  }
+  if (isCardOpen()) return;
+
+  const issues = latestIssues.get(element) ?? [];
+  const mgr = managers.get(element);
+  if (!mgr) return;
+
+  const annotationSupport = getAnnotationSupport(element);
+  if (annotationSupport.mode === 'panel') return;
+
+  const annotationMode = annotationSupport.mode === 'overlay' ? 'overlay' : 'inline';
+  selfMutating = true;
+  try {
+    mgr.annotate(issues, annotationMode);
+  } finally {
+    window.setTimeout(() => { selfMutating = false; }, 0);
+  }
 }
 
 function scheduleCheck(element: HTMLElement) {
@@ -1124,6 +1182,22 @@ function attachListener(el: HTMLElement) {
     }
     logHistoryEvent('checker:focus', getCheckerElementLogData(el));
     syncPageState();
+  });
+
+  el.addEventListener('blur', () => {
+    // Render deferred annotations immediately when the user leaves the editor
+    renderDeferredAnnotations(el);
+  });
+
+  el.addEventListener('keydown', () => {
+    // Clear marks on any keystroke so caret movement isn't disrupted
+    if (selfMutating) return;
+    const mgr = managers.get(el);
+    if (mgr && mgr.getRenderedMarkCount() > 0) {
+      selfMutating = true;
+      mgr.clear();
+      window.setTimeout(() => { selfMutating = false; }, 0);
+    }
   });
 
   el.addEventListener('mouseup', () => {

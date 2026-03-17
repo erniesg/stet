@@ -8,18 +8,17 @@ stet-mark,
 
 /* Inline underlines by category */
 stet-mark {
-  text-decoration-line: underline;
-  text-decoration-style: solid;
-  text-decoration-color: var(--stet-annotation-color);
-  outline: none;
-  text-decoration-thickness: 2px;
-  text-underline-offset: 3px;
-  text-decoration-skip-ink: none;
+  text-decoration-line: underline !important;
+  text-decoration-style: solid !important;
+  text-decoration-color: var(--stet-annotation-color) !important;
+  text-decoration-thickness: 2px !important;
+  text-underline-offset: 3px !important;
+  text-decoration-skip-ink: none !important;
+  outline: none !important;
   cursor: pointer;
   position: relative;
   border-radius: 3px;
   background: linear-gradient(to top, var(--stet-annotation-tint), transparent 60%);
-  outline: none;
   transition: background 0.15s;
 }
 

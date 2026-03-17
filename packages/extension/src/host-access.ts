@@ -1,4 +1,8 @@
-const DEFAULT_SITE_ALLOWLIST: string[] = [];
+const DEFAULT_SITE_ALLOWLIST: string[] = [
+  'localhost',
+  '127.0.0.1',
+  'btaitools.techinasia.com',
+];
 
 export function normalizeSiteAllowlist(hosts: unknown): string[] {
   const values = Array.isArray(hosts)
