@@ -289,7 +289,7 @@ function filterIgnoredIssues(element: HTMLElement, issues: Issue[]): Issue[] {
 function rememberElementIssues(element: HTMLElement, issues: Issue[]) {
   latestIssues.set(element, issues);
   getOrCreateManager(element)?.setIssues(issues);
-  getIssuePanel().updateIssues(element, issues);
+  syncIssuePanelElementIssues(element, issues);
 }
 
 function publishElementIssues(element: HTMLElement, issues: Issue[]) {
@@ -473,7 +473,7 @@ function cleanupTrackedEditable(element: HTMLElement) {
   managers.delete(element);
   trackedEditables.delete(element);
   latestIssues.delete(element);
-  getIssuePanel().removeElement(element);
+  issuePanel?.removeElement(element);
 }
 
 function getResolvedEditableElement(element: HTMLElement): HTMLElement | null {
@@ -551,7 +551,10 @@ function getPageIssueCount(): number {
 }
 
 function syncPageState() {
-  getIssuePanel().setActiveElement(getPreferredPopupElement());
+  const issuePanelElement = getPreferredIssuePanelElement();
+  if (issuePanel || issuePanelElement) {
+    getIssuePanel().setActiveElement(issuePanelElement);
+  }
 
   try {
     chrome.runtime.sendMessage({
@@ -668,6 +671,24 @@ function getPreferredPopupElement(): HTMLElement | null {
   }
 
   return null;
+}
+
+function getPreferredIssuePanelElement(): HTMLElement | null {
+  const activeCheckElement = getActiveCheckElement();
+  if (!activeCheckElement) return null;
+
+  const target = getEditableTarget(activeCheckElement);
+  return target?.kind === 'textarea' ? activeCheckElement : null;
+}
+
+function syncIssuePanelElementIssues(element: HTMLElement, issues: Issue[]) {
+  const target = getEditableTarget(element);
+  if (target?.kind === 'textarea') {
+    getIssuePanel().updateIssues(element, issues);
+    return;
+  }
+
+  issuePanel?.removeElement(element);
 }
 
 function serializeIssue(issue: Issue): PopupIssueRecord {
