@@ -246,6 +246,14 @@ function createFakeDocsInput(root: HTMLElement, mode: 'html' | 'svg' = 'html') {
       render();
       return;
     }
+
+    if (event.key === 'Delete') {
+      if (!deleteSelection() && state.selectionEnd < state.text.length) {
+        state.text = `${state.text.slice(0, state.selectionEnd)}${state.text.slice(state.selectionEnd + 1)}`;
+      }
+      render();
+      return;
+    }
   });
 
   iframeDoc.addEventListener('keypress', (event) => {

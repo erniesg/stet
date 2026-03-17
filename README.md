@@ -97,7 +97,7 @@ Set `language: zh-SG` to switch `COMMON-SPELL-01` to a bundled Chinese wordlist.
 
 Chinese support is currently dictionary-based spellcheck. The rest of the common readability pack remains English-oriented.
 
-The extension options page also includes a `Zaobao Chinese` preset. It switches the extension to `zh-SG`, limits the common pack to `COMMON-SPELL-01`, and lets editors add newsroom-specific custom terms from the UI.
+The extension options page and popup include demo profile and language toggles. The `Singapore Chinese` profile keeps the current newsroom/product config intact, switches the checker to `zh-SG`, and limits the common pack to `COMMON-SPELL-01`. Editors can still force `en-GB`, `en-US`, or `zh-SG` directly and add newsroom-specific custom terms from the UI.
 
 ## Custom packs
 

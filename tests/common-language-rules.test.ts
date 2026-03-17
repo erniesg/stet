@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { check, loadCommonDictionary } from '../src/index.js';
 
@@ -54,5 +55,22 @@ describe('common capitalization and spelling rules', () => {
     const spelling = issues.filter((issue) => issue.rule === 'COMMON-SPELL-01');
     expect(spelling.length).toBe(1);
     expect(spelling[0].originalText).toBe('詀');
+  });
+
+  it('accepts a combined zh-SG newsroom sentence from the generated dictionary', () => {
+    const words = readFileSync(new URL('../data/wordlist-zh-sg.txt', import.meta.url), 'utf8')
+      .trim()
+      .split('\n');
+    loadCommonDictionary(words);
+
+    const issues = check('人民协会和社区发展理事会在组屋区与居民委员会、市镇理事会谈易通卡、公路电子收费和巴士专用道。', {
+      packs: ['common'],
+      role: 'subeditor',
+      enabledRules: ['COMMON-SPELL-01'],
+      configOverrides: { language: 'zh-SG' },
+    });
+
+    const spelling = issues.filter((issue) => issue.rule === 'COMMON-SPELL-01');
+    expect(spelling).toEqual([]);
   });
 });

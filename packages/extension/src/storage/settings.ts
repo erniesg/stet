@@ -3,13 +3,13 @@
  *
  * The extension stores two things in chrome.storage:
  *   1. A resolved newsroom config (from stet.config.yaml, pre-resolved at build time)
- *   2. Per-user overrides (role, disabled rules, site allowlist)
+ *   2. Per-user overrides (profile, language, role, disabled rules, site allowlist)
  *
  * At runtime, user overrides are layered on top of the resolved config
  * via applyUserOverrides() from stet.
  */
 
-import type { ResolvedStetConfig, UserOverrides } from 'stet';
+import type { Language, ResolvedStetConfig, UserOverrides as CoreUserOverrides } from 'stet';
 import { DEFAULT_RESOLVED_CONFIG, applyUserOverrides } from 'stet';
 import {
   DEFAULT_HISTORY_SETTINGS,
@@ -17,9 +17,20 @@ import {
   type HistorySettings,
 } from '../history-settings.js';
 import { getDefaultSiteAllowlist, normalizeSiteAllowlist } from '../host-access.js';
+import {
+  applyProfileToConfig,
+  getActiveProfileId,
+  isSupportedLanguage,
+  normalizeProfileId,
+} from './profiles.js';
 
 // Re-export types for extension consumers
-export type { ResolvedStetConfig, UserOverrides };
+export type { ResolvedStetConfig };
+
+export interface UserOverrides extends CoreUserOverrides {
+  language?: Language;
+  profileId?: string;
+}
 
 /** What we persist in chrome.storage.sync */
 export interface StoredSettings {
@@ -64,7 +75,11 @@ export async function saveSettings(settings: Partial<StoredSettings>): Promise<v
 /** Get the effective config (resolved + user overrides applied) */
 export async function getEffectiveConfig(): Promise<ResolvedStetConfig> {
   const { resolvedConfig, userOverrides } = await loadSettings();
-  return applyUserOverrides(resolvedConfig, userOverrides);
+  const profiledConfig = applyProfileToConfig(
+    resolvedConfig,
+    getActiveProfileId(userOverrides.profileId, resolvedConfig),
+  );
+  return applyUserOverrides(profiledConfig, userOverrides);
 }
 
 /** Get version-history specific settings */
@@ -83,9 +98,15 @@ export async function updateUserOverrides(patch: Partial<UserOverrides>): Promis
 
 function normalizeUserOverrides(overrides?: Partial<UserOverrides> | null): UserOverrides {
   const normalizedOverrides = overrides ? { ...overrides } : {};
+  const profileId = normalizeProfileId(normalizedOverrides.profileId);
+  const language = isSupportedLanguage(normalizedOverrides.language)
+    ? normalizedOverrides.language
+    : undefined;
 
   return {
     ...normalizedOverrides,
+    language,
+    profileId: profileId ?? undefined,
     siteAllowlist: normalizeSiteAllowlist(normalizedOverrides.siteAllowlist),
   };
 }

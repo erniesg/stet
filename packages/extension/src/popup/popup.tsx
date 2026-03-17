@@ -4,6 +4,11 @@ import { diffText } from '../content/version-history-diff.js';
 import { createInlineDiff, createDiffStat } from '../shared/diff-renderer.js';
 import type { EditableHistoryRecord, VersionSnapshot } from '../content/version-history-core.js';
 import { normalizeSiteAllowlist } from '../host-access.js';
+import {
+  getActiveProfileId,
+  listLanguageOptions,
+  listProfiles,
+} from '../storage/profiles.js';
 import { getHistoryRefreshTarget } from './popup-sync.js';
 
 const COLORS = {
@@ -20,6 +25,9 @@ const ROLES = [
   { id: 'journalist', label: 'Journalist', desc: 'House style only — readability off' },
   { id: 'subeditor', label: 'Sub-editor', desc: 'Everything — readability, style, grammar' },
 ];
+const PROFILES = listProfiles();
+const LANGUAGE_OPTIONS = listLanguageOptions();
+type LanguageSetting = typeof LANGUAGE_OPTIONS[number]['id'];
 
 interface PopupIssue {
   key: string;
@@ -94,6 +102,9 @@ function Popup() {
   const [enabled, setEnabled] = useState(true);
   const [packs, setPacks] = useState<string[]>([]);
   const [role, setRole] = useState('journalist');
+  const [profileId, setProfileId] = useState('standard');
+  const [languageSetting, setLanguageSetting] = useState<LanguageSetting>('base');
+  const [effectiveLanguage, setEffectiveLanguage] = useState('en-GB');
   const [loading, setLoading] = useState(true);
   const [activeTabId, setActiveTabId] = useState<number | null>(null);
   const [activeHostname, setActiveHostname] = useState<string | null>(null);
@@ -123,24 +134,32 @@ function Popup() {
   const historyDiff = selectedSnapshot && historyLiveEditorAvailable
     ? diffText(historyCurrentText, selectedSnapshot.content)
     : null;
+  const activeProfile = PROFILES.find((profile) => profile.id === profileId) ?? PROFILES[0];
+  const activeLanguageOption = LANGUAGE_OPTIONS.find((option) => option.id === languageSetting) ?? LANGUAGE_OPTIONS[0];
   const currentSiteScoped = activeHostname
     ? siteAllowlist.length === 0 || siteAllowlist.some((entry) => activeHostname === entry || activeHostname.endsWith(`.${entry}`))
     : false;
 
-  useEffect(() => {
+  const loadConfigState = () => {
     chrome.runtime.sendMessage({ type: 'GET_SETTINGS' }, (resp) => {
       if (resp?.config) {
         setEnabled(resp.config.enabled);
         setPacks(resp.config.packs || []);
         setRole(resp.config.role || 'journalist');
+        setEffectiveLanguage(resp.config.language || 'en-GB');
       }
       setLoading(false);
     });
 
     chrome.runtime.sendMessage({ type: 'GET_RAW_SETTINGS' }, (resp) => {
       setSiteAllowlist(normalizeSiteAllowlist(resp?.userOverrides?.siteAllowlist));
+      setProfileId(getActiveProfileId(resp?.userOverrides?.profileId, resp?.resolvedConfig));
+      setLanguageSetting(resp?.userOverrides?.language ?? 'base');
     });
+  };
 
+  useEffect(() => {
+    loadConfigState();
     loadPageIssues(setIssuesState, setIssuesError, setActiveTabId);
     withActiveTabInfo((tabId, url) => {
       setActiveTabId(tabId);
@@ -254,20 +273,45 @@ function Popup() {
     }
   };
 
+  const reloadConfigAndRefresh = () => {
+    loadConfigState();
+    withActiveTab((tabId) => {
+      chrome.tabs.sendMessage(tabId, { type: 'RELOAD_CONFIG_AND_RECHECK' }, () => {
+        if (chrome.runtime.lastError) { /* tab may not have content script */ }
+        refreshIssues();
+      });
+    });
+  };
+
   const changeRole = (newRole: string) => {
     setRole(newRole);
-    // Save override first, then reload content script config once save is confirmed
     chrome.runtime.sendMessage({
       type: 'UPDATE_USER_OVERRIDES',
       overrides: { role: newRole },
     }, () => {
-      // Save confirmed — now tell the content script to reload and re-check
-      withActiveTab((tabId) => {
-        chrome.tabs.sendMessage(tabId, { type: 'RELOAD_CONFIG_AND_RECHECK' }, () => {
-          if (chrome.runtime.lastError) { /* tab may not have content script */ }
-          refreshIssues();
-        });
-      });
+      reloadConfigAndRefresh();
+    });
+  };
+
+  const changeProfile = (newProfileId: string) => {
+    setProfileId(newProfileId);
+    chrome.runtime.sendMessage({
+      type: 'APPLY_PROFILE',
+      profileId: newProfileId,
+    }, () => {
+      reloadConfigAndRefresh();
+    });
+  };
+
+  const changeLanguage = (nextLanguage: LanguageSetting) => {
+    setLanguageSetting(nextLanguage);
+    chrome.runtime.sendMessage({
+      type: 'UPDATE_USER_OVERRIDES',
+      overrides: {
+        language: nextLanguage === 'base' ? undefined : nextLanguage,
+      },
+    }, () => {
+      reloadConfigAndRefresh();
     });
   };
 
@@ -591,6 +635,54 @@ function Popup() {
           </div>
 
           <div style={styles.section}>
+            <span style={styles.sectionLabel}>Profile</span>
+            <div style={styles.roleGroup}>
+              {PROFILES.map((profile) => (
+                <button
+                  key={profile.id}
+                  onClick={() => changeProfile(profile.id)}
+                  style={{
+                    ...styles.roleBtn,
+                    background: profileId === profile.id ? COLORS.primary : '#fff',
+                    color: profileId === profile.id ? '#fff' : '#374151',
+                    borderColor: profileId === profile.id ? COLORS.primary : COLORS.border,
+                  }}
+                >
+                  <span style={{ fontWeight: '500', fontSize: '12px' }}>{profile.name}</span>
+                </button>
+              ))}
+            </div>
+            <span style={styles.roleDescription}>
+              {activeProfile.description}
+            </span>
+          </div>
+
+          <div style={styles.section}>
+            <span style={styles.sectionLabel}>Language</span>
+            <div style={styles.roleGroup}>
+              {LANGUAGE_OPTIONS.map((option) => (
+                <button
+                  key={option.id}
+                  onClick={() => changeLanguage(option.id)}
+                  style={{
+                    ...styles.roleBtn,
+                    background: languageSetting === option.id ? COLORS.primary : '#fff',
+                    color: languageSetting === option.id ? '#fff' : '#374151',
+                    borderColor: languageSetting === option.id ? COLORS.primary : COLORS.border,
+                  }}
+                >
+                  <span style={{ fontWeight: '500', fontSize: '12px' }}>{option.label}</span>
+                </button>
+              ))}
+            </div>
+            <span style={styles.roleDescription}>
+              {languageSetting === 'base'
+                ? `Using ${effectiveLanguage} from the selected profile and newsroom config.`
+                : `${activeLanguageOption.description} Overrides the selected profile until you switch back to Base.`}
+            </span>
+          </div>
+
+          <div style={styles.section}>
             <div style={styles.configRow}>
               <span style={styles.sectionLabel}>Advanced</span>
               <button type="button" style={styles.linkButton} onClick={openOptions}>
@@ -632,6 +724,9 @@ function Popup() {
         <div style={styles.configRow}>
           <span style={styles.sectionLabel}>Packs</span>
           <span style={styles.valueText}>{packs.join(', ') || 'common'}</span>
+        </div>
+        <div style={styles.issueMeta}>
+          Effective language: {effectiveLanguage}
         </div>
       </div>
 
@@ -1180,6 +1275,7 @@ const styles: Record<string, Record<string, string | number>> = {
   roleGroup: {
     display: 'flex',
     gap: '6px',
+    flexWrap: 'wrap',
   },
   roleBtn: {
     flex: '1',

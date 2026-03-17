@@ -1039,8 +1039,7 @@ export class VersionHistoryManager {
   }
 
   private get isFieldMode(): boolean {
-    // Always use page mode (fixed bottom-right) — never float over the editor
-    return false;
+    return this.runtime.allowAnchoredUi;
   }
 
   private get showUi(): boolean {

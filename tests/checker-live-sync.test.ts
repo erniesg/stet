@@ -39,6 +39,13 @@ interface RuntimeListener {
   ): boolean | void;
 }
 
+interface StorageChangeListener {
+  (
+    changes: Record<string, { oldValue?: unknown; newValue?: unknown }>,
+    areaName: string,
+  ): void;
+}
+
 function mockRect(element: HTMLElement, width = 320, height = 120) {
   Object.defineProperty(element, 'getBoundingClientRect', {
     configurable: true,
@@ -58,6 +65,7 @@ function mockRect(element: HTMLElement, width = 320, height = 120) {
 
 function createChromeMock() {
   const listeners: RuntimeListener[] = [];
+  const storageChangeListeners: StorageChangeListener[] = [];
 
   (globalThis as typeof globalThis & { chrome: unknown }).chrome = {
     runtime: {
@@ -90,9 +98,16 @@ function createChromeMock() {
         }),
       },
     },
+    storage: {
+      onChanged: {
+        addListener: vi.fn((listener: StorageChangeListener) => {
+          storageChangeListeners.push(listener);
+        }),
+      },
+    },
   };
 
-  return { listeners };
+  return { listeners, storageChangeListeners };
 }
 
 async function dispatchRuntimeMessage(listener: RuntimeListener, message: Record<string, unknown>) {
@@ -269,6 +284,38 @@ describe('checker live sync', () => {
     expect(state.editorCount).toBe(1);
     expect(state.activeLabel).toBe('Generated draft');
     expect(state.issues[0]?.rule).toBe('SPELL');
+  });
+
+  it('reloads custom spellcheck terms from storage changes without a page reload', async () => {
+    const { storageChangeListeners } = createChromeMock();
+    const onDictionaryLoaded = vi.fn();
+    const dictionaryLoader = await import('../packages/extension/src/content/dictionary-loader.js');
+    vi.mocked(dictionaryLoader.loadDictionary).mockResolvedValue(['巴士专用道']);
+    vi.mocked(dictionaryLoader.loadCustomTerms)
+      .mockResolvedValueOnce(['德士'])
+      .mockResolvedValueOnce(['德士', '陆交局']);
+
+    const { initChecker } = await import('../packages/extension/src/content/checker.js');
+
+    document.body.innerHTML = `<div id="editor" contenteditable="true" aria-label="Draft body">德士</div>`;
+    const editor = document.getElementById('editor') as HTMLElement;
+    mockRect(editor);
+
+    await initChecker(onDictionaryLoaded);
+    await waitForChecks();
+
+    expect(onDictionaryLoaded).toHaveBeenLastCalledWith(['巴士专用道', '德士']);
+
+    storageChangeListeners[0]?.({
+      stet_custom_terms: {
+        oldValue: ['德士'],
+        newValue: ['德士', '陆交局'],
+      },
+    }, 'sync');
+    await waitForChecks();
+
+    expect(vi.mocked(dictionaryLoader.loadCustomTerms)).toHaveBeenCalledTimes(2);
+    expect(onDictionaryLoaded).toHaveBeenLastCalledWith(['巴士专用道', '德士', '陆交局']);
   });
 
   it('creates a textarea mirror and annotates it inline for textarea-based editors', async () => {

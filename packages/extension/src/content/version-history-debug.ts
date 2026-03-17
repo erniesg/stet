@@ -180,6 +180,7 @@ export function getHistoryErrorLogData(error: unknown): Record<string, unknown> 
 }
 
 function scheduleHistoryDebugBufferSync() {
+  if (typeof window === 'undefined') return;
   if (debugSyncTimer !== null) return;
 
   debugSyncTimer = window.setTimeout(() => {
@@ -189,6 +190,7 @@ function scheduleHistoryDebugBufferSync() {
 }
 
 function syncHistoryDebugBuffer(force = false) {
+  if (typeof window === 'undefined') return;
   const entries = [...(window.__stetHistoryDebug ?? [])];
   if (entries.length === 0) return;
 

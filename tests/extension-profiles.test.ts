@@ -1,49 +1,79 @@
 import { describe, expect, it } from 'vitest';
+import { DEFAULT_RESOLVED_CONFIG } from 'stet';
 
 import {
+  applyProfileToConfig,
   detectProfileId,
+  getActiveProfileId,
   getProfile,
+  isSupportedLanguage,
+  listLanguageOptions,
   listProfiles,
-  resetOverridesForProfile,
 } from '../packages/extension/src/storage/profiles.js';
 
 describe('extension profiles', () => {
-  it('exposes the Zaobao preset with zh-SG spellcheck only', () => {
-    const zaobao = getProfile('zaobao');
+  it('exposes the Singapore Chinese preset with zh-SG spellcheck defaults', () => {
+    const singaporeChinese = getProfile('sg-chinese');
 
-    expect(zaobao.name).toBe('Zaobao Chinese');
-    expect(zaobao.resolvedConfig.language).toBe('zh-SG');
-    expect(zaobao.resolvedConfig.rules.enable).toEqual(['COMMON-SPELL-01']);
-    expect(zaobao.suggestedHosts).toContain('www.zaobao.com.sg');
+    expect(singaporeChinese.name).toBe('Singapore Chinese');
+    expect(singaporeChinese.language).toBe('zh-SG');
+    expect(singaporeChinese.enabledRules).toEqual(['COMMON-SPELL-01']);
+    expect(singaporeChinese.suggestedHosts).toEqual([]);
   });
 
-  it('detects built-in profiles from resolved config', () => {
-    const standard = getProfile('standard');
-    const zaobao = getProfile('zaobao');
+  it('applies the Singapore Chinese profile as a non-destructive overlay', () => {
+    const config = applyProfileToConfig({
+      ...DEFAULT_RESOLVED_CONFIG,
+      packs: ['common', 'bt'],
+      language: 'en-US',
+      role: 'subeditor',
+      packConfig: {
+        ...DEFAULT_RESOLVED_CONFIG.packConfig,
+        language: 'en-US',
+      },
+      rules: {
+        enable: ['BT-STYLE-01'],
+        disable: ['COMMON-FRE-01'],
+      },
+    }, 'sg-chinese');
 
-    expect(detectProfileId(standard.resolvedConfig)).toBe('standard');
-    expect(detectProfileId(zaobao.resolvedConfig)).toBe('zaobao');
+    expect(config.packs).toEqual(['common', 'bt']);
+    expect(config.language).toBe('zh-SG');
+    expect(config.packConfig.language).toBe('zh-SG');
+    expect(config.role).toBe('journalist');
+    expect(config.rules.enable).toEqual(['COMMON-SPELL-01']);
+    expect(config.rules.disable).toEqual([]);
+  });
+
+  it('keeps the legacy zaobao alias working for callers', () => {
+    const aliased = getProfile('zaobao');
+
+    expect(aliased.id).toBe('sg-chinese');
+    expect(aliased.name).toBe('Singapore Chinese');
+    expect(aliased.language).toBe('zh-SG');
+  });
+
+  it('detects legacy bundled profiles from stored resolved config', () => {
+    expect(detectProfileId(DEFAULT_RESOLVED_CONFIG)).toBe('standard');
+    expect(detectProfileId(applyProfileToConfig(DEFAULT_RESOLVED_CONFIG, 'sg-chinese'))).toBe('sg-chinese');
     expect(detectProfileId({
-      ...zaobao.resolvedConfig,
+      ...applyProfileToConfig(DEFAULT_RESOLVED_CONFIG, 'sg-chinese'),
       role: 'subeditor',
     })).toBeNull();
   });
 
-  it('drops profile-specific user overrides while preserving site scope and enabled state', () => {
-    expect(resetOverridesForProfile({
-      enabled: false,
-      role: 'subeditor',
-      disableRules: ['COMMON-SPACE-01'],
-      siteAllowlist: ['www.zaobao.com.sg'],
-      debounceMs: 250,
-    })).toEqual({
-      enabled: false,
-      siteAllowlist: ['www.zaobao.com.sg'],
-      debounceMs: 250,
-    });
+  it('derives the active profile from overrides before legacy config inference', () => {
+    expect(getActiveProfileId('sg-chinese', DEFAULT_RESOLVED_CONFIG)).toBe('sg-chinese');
+    expect(getActiveProfileId(undefined, DEFAULT_RESOLVED_CONFIG)).toBe('standard');
   });
 
   it('lists both bundled profiles', () => {
-    expect(listProfiles().map(profile => profile.id)).toEqual(['standard', 'zaobao']);
+    expect(listProfiles().map(profile => profile.id)).toEqual(['standard', 'sg-chinese']);
+  });
+
+  it('lists supported demo language toggles', () => {
+    expect(listLanguageOptions().map(option => option.id)).toEqual(['base', 'en-GB', 'en-US', 'zh-SG']);
+    expect(isSupportedLanguage('zh-SG')).toBe(true);
+    expect(isSupportedLanguage('fr-FR')).toBe(false);
   });
 });

@@ -352,6 +352,8 @@ export interface ResolvedStetConfig {
 export interface UserOverrides {
   /** Override enabled state */
   enabled?: boolean;
+  /** Override active language */
+  language?: Language;
   /** Override active role */
   role?: string;
   /** Additional rules to disable (user-level ignore) */

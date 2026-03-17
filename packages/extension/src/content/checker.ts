@@ -28,7 +28,7 @@ import {
   replaceEditableRange,
   replaceEditableText,
 } from './editable-target.js';
-// import { IssuePanelManager } from './issue-panel.js';
+import { IssuePanelManager } from './issue-panel.js';
 import { resolveIssueApplyRange } from './issue-range.js';
 import { getReplacementText } from './replacement-text.js';
 import {
@@ -69,11 +69,12 @@ let domObserver: MutationObserver | null = null;
 let dictionaryLoadPromise: Promise<string[]> | null = null;
 let historyTrackingRegistered = false;
 let historyFeatureEnabled = true;
+let storageChangeListenerRegistered = false;
 const CHECKER_MARK_SELECTOR = 'stet-mark';
 const INPUT_MUTATION_SUPPRESS_MS = 750;
 const recentInputAt = new WeakMap<HTMLElement, number>();
 const DISCOVERY_ATTRIBUTE_FILTER = ['style', 'class', 'hidden', 'aria-hidden', 'contenteditable', 'role'];
-// let issuePanel: IssuePanelManager | null = null;
+let issuePanel: IssuePanelManager | null = null;
 
 interface PopupIssueRecord {
   key: string;
@@ -186,6 +187,7 @@ function extractParagraphs(text: string): { headline?: string; body: string[] } 
 
 function getIssues(element: HTMLElement, text = readEditableText(element)): Issue[] {
   if (!config || !config.enabled) return [];
+  if (!isHostAllowed(window.location.hostname, config.siteAllowlist)) return [];
   if (!text.trim()) return [];
 
   const { headline, body } = extractParagraphs(text);
@@ -276,7 +278,7 @@ function filterIgnoredIssues(element: HTMLElement, issues: Issue[]): Issue[] {
 function rememberElementIssues(element: HTMLElement, issues: Issue[]) {
   latestIssues.set(element, issues);
   getOrCreateManager(element)?.setIssues(issues);
-  // getIssuePanel().updateIssues(element, issues);
+  getIssuePanel().updateIssues(element, issues);
 }
 
 function publishElementIssues(element: HTMLElement, issues: Issue[]) {
@@ -426,7 +428,7 @@ function cleanupTrackedEditable(element: HTMLElement) {
   managers.delete(element);
   trackedEditables.delete(element);
   latestIssues.delete(element);
-  // getIssuePanel().removeElement(element);
+  getIssuePanel().removeElement(element);
   const timer = timers.get(element);
   if (timer) clearTimeout(timer);
   timers.delete(element);
@@ -507,7 +509,7 @@ function getPageIssueCount(): number {
 }
 
 function syncPageState() {
-  // getIssuePanel().setActiveElement(getPreferredPopupElement());
+  getIssuePanel().setActiveElement(getPreferredPopupElement());
 
   try {
     chrome.runtime.sendMessage({
@@ -528,12 +530,12 @@ function getEditorCount(): number {
   return total;
 }
 
-// function getIssuePanel(): IssuePanelManager {
-//   if (!issuePanel) {
-//     issuePanel = new IssuePanelManager(applySelectedFixes);
-//   }
-//   return issuePanel;
-// }
+function getIssuePanel(): IssuePanelManager {
+  if (!issuePanel) {
+    issuePanel = new IssuePanelManager(applySelectedFixes);
+  }
+  return issuePanel;
+}
 
 function getTrackedEditable(start: EventTarget | null): HTMLElement | null {
   const editable = findHistoryEditable(start);
@@ -979,9 +981,7 @@ function registerRuntimeHandlers() {
     chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       if (message?.type === 'RELOAD_CONFIG_AND_RECHECK') {
         loadConfig().then((newConfig) => {
-          // Preserve actual registered packs
-          const registered = listPacks().map(p => p.id);
-          config = { ...newConfig, packs: registered };
+          config = resolveRuntimeConfig(newConfig);
           refreshAllChecks();
           syncPageState();
           sendResponse(getPopupIssuesState());
@@ -1334,6 +1334,60 @@ function loadSpellCheckDictionaryOnce(): Promise<string[]> {
   return dictionaryLoadPromise;
 }
 
+function resolveRuntimeConfig(nextConfig: ResolvedStetConfig): ResolvedStetConfig {
+  const registered = listPacks().map(p => p.id);
+  let resolved = { ...nextConfig, packs: registered };
+
+  // If bt-pack is active, disable common spell check (bt-pack's is more complete)
+  if (registered.includes('bt')) {
+    const disabled = resolved.rules?.disable ?? [];
+    if (!disabled.includes('COMMON-SPELL-01')) {
+      resolved = {
+        ...resolved,
+        rules: { ...resolved.rules, disable: [...disabled, 'COMMON-SPELL-01'] },
+      };
+    }
+  }
+
+  return resolved;
+}
+
+function applyLoadedDictionary(words: string[], onDictionaryLoaded?: OnDictionaryLoaded) {
+  onDictionaryLoaded?.(words);
+  console.log(`[stet] Dictionary ready (${words.length} words)`);
+  refreshAllChecks();
+}
+
+async function refreshRuntimeState(onDictionaryLoaded?: OnDictionaryLoaded) {
+  config = resolveRuntimeConfig(await loadConfig());
+  dictionaryLoadPromise = null;
+
+  try {
+    const words = await loadSpellCheckDictionaryOnce();
+    applyLoadedDictionary(words, onDictionaryLoaded);
+  } catch (err) {
+    console.warn('[stet] Dictionary reload failed:', err);
+    onDictionaryLoaded?.([]);
+    refreshAllChecks();
+  }
+}
+
+function registerStorageChangeListener(onDictionaryLoaded?: OnDictionaryLoaded) {
+  if (storageChangeListenerRegistered) return;
+
+  try {
+    chrome.storage.onChanged.addListener((changes, areaName) => {
+      if (areaName !== 'sync') return;
+      if (!('resolvedConfig' in changes) && !('userOverrides' in changes) && !('stet_custom_terms' in changes)) {
+        return;
+      }
+
+      void refreshRuntimeState(onDictionaryLoaded);
+    });
+    storageChangeListenerRegistered = true;
+  } catch {}
+}
+
 /** Callback type for dictionary loading hook */
 export type OnDictionaryLoaded = (words: string[]) => void;
 
@@ -1354,17 +1408,7 @@ export async function initChecker(onDictionaryLoaded?: OnDictionaryLoaded) {
   config = await loadConfig();
   historyFeatureEnabled = await loadHistoryFeatureEnabled();
 
-  // Override config packs with whatever is actually registered
-  const registered = listPacks().map(p => p.id);
-  config = { ...config, packs: registered };
-
-  // If bt-pack is active, disable common spell check (bt-pack's is more complete)
-  if (registered.includes('bt')) {
-    const disabled = config.rules?.disable ?? [];
-    if (!disabled.includes('COMMON-SPELL-01')) {
-      config = { ...config, rules: { ...config.rules, disable: [...disabled, 'COMMON-SPELL-01'] } };
-    }
-  }
+  config = resolveRuntimeConfig(config);
 
   // Sync actual packs back to storage so popup reflects reality
   try {
@@ -1381,7 +1425,7 @@ export async function initChecker(onDictionaryLoaded?: OnDictionaryLoaded) {
     return;
   }
 
-  console.log('[stet] Active — packs:', registered.map(id => {
+  console.log('[stet] Active — packs:', config.packs.map(id => {
     const p = listPacks().find(p => p.id === id);
     return `${id} (${p?.rules.length ?? 0} rules)`;
   }).join(', '));
@@ -1390,6 +1434,7 @@ export async function initChecker(onDictionaryLoaded?: OnDictionaryLoaded) {
   observeDOM();
   registerLateEditableDiscovery();
   registerRuntimeHandlers();
+  registerStorageChangeListener(onDictionaryLoaded);
   if (historyFeatureEnabled) {
     registerHistoryTracking();
   }
@@ -1399,10 +1444,6 @@ export async function initChecker(onDictionaryLoaded?: OnDictionaryLoaded) {
 
   // Load dictionary in the background — doesn't block initial check
   loadSpellCheckDictionaryOnce().then((words) => {
-    if (words.length > 0 && onDictionaryLoaded) {
-      onDictionaryLoaded(words);
-      console.log(`[stet] Dictionary ready (${words.length} words)`);
-      refreshAllChecks();
-    }
+    applyLoadedDictionary(words, onDictionaryLoaded);
   });
 }

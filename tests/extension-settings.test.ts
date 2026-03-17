@@ -68,4 +68,43 @@ describe('extension settings normalization', () => {
     const effective = await getEffectiveConfig();
     expect(effective.siteAllowlist).toEqual(['mail.google.com']);
   });
+
+  it('applies the selected demo profile without replacing the loaded newsroom config', async () => {
+    installChromeStorageSync({
+      resolvedConfig: {
+        ...DEFAULT_RESOLVED_CONFIG,
+        packs: ['common', 'bt'],
+        language: 'en-US',
+        role: 'subeditor',
+        packConfig: {
+          ...DEFAULT_RESOLVED_CONFIG.packConfig,
+          language: 'en-US',
+        },
+      },
+      userOverrides: {
+        profileId: 'sg-chinese',
+      },
+    });
+
+    const effective = await getEffectiveConfig();
+    expect(effective.packs).toEqual(['common', 'bt']);
+    expect(effective.language).toBe('zh-SG');
+    expect(effective.packConfig.language).toBe('zh-SG');
+    expect(effective.rules.enable).toEqual(['COMMON-SPELL-01']);
+  });
+
+  it('lets an explicit language override win over the selected demo profile', async () => {
+    installChromeStorageSync({
+      resolvedConfig: DEFAULT_RESOLVED_CONFIG,
+      userOverrides: {
+        profileId: 'sg-chinese',
+        language: 'en-US',
+      },
+    });
+
+    const effective = await getEffectiveConfig();
+    expect(effective.language).toBe('en-US');
+    expect(effective.packConfig.language).toBe('en-US');
+    expect(effective.rules.enable).toEqual(['COMMON-SPELL-01']);
+  });
 });
