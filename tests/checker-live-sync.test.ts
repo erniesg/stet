@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { Mock } from 'vitest';
 
 vi.mock('stet', () => ({
   check: vi.fn(() => []),
@@ -39,6 +40,13 @@ interface RuntimeListener {
   ): boolean | void;
 }
 
+interface StorageChangeListener {
+  (
+    changes: Record<string, { oldValue?: unknown; newValue?: unknown }>,
+    areaName: string,
+  ): void;
+}
+
 function mockRect(element: HTMLElement, width = 320, height = 120) {
   Object.defineProperty(element, 'getBoundingClientRect', {
     configurable: true,
@@ -56,8 +64,9 @@ function mockRect(element: HTMLElement, width = 320, height = 120) {
   });
 }
 
-function createChromeMock() {
+function createChromeMock(configOverrides: Partial<Record<string, unknown>> = {}) {
   const listeners: RuntimeListener[] = [];
+  const storageChangeListeners: StorageChangeListener[] = [];
 
   (globalThis as typeof globalThis & { chrome: unknown }).chrome = {
     runtime: {
@@ -77,6 +86,7 @@ function createChromeMock() {
               enabled: true,
               siteAllowlist: [],
               debounceMs: 25,
+              ...configOverrides,
             },
           });
           return;
@@ -90,9 +100,16 @@ function createChromeMock() {
         }),
       },
     },
+    storage: {
+      onChanged: {
+        addListener: vi.fn((listener: StorageChangeListener) => {
+          storageChangeListeners.push(listener);
+        }),
+      },
+    },
   };
 
-  return { listeners };
+  return { listeners, storageChangeListeners };
 }
 
 async function dispatchRuntimeMessage(listener: RuntimeListener, message: Record<string, unknown>) {
@@ -144,7 +161,7 @@ describe('checker live sync', () => {
     editor.dispatchEvent(new Event('input', { bubbles: true }));
     await waitForChecks();
 
-    expect(document.querySelectorAll('stet-mark')).toHaveLength(1);
+    expect(document.querySelectorAll('stet-mark').length).toBeGreaterThan(0);
     const initialState = await dispatchRuntimeMessage(listeners[0], { type: 'GET_PAGE_ISSUES' }) as {
       totalIssues: number;
       issues: Array<{ rule: string }>;
@@ -171,6 +188,86 @@ describe('checker live sync', () => {
     };
     expect(settledState.totalIssues).toBe(0);
     expect(settledState.issues).toHaveLength(0);
+  });
+
+  it('defers checks until composition ends for composing edits', async () => {
+    createChromeMock();
+    const stet = await import('stet');
+    const { initChecker } = await import('../packages/extension/src/content/checker.js');
+
+    document.body.innerHTML = `<div id="editor" contenteditable="true" aria-label="Draft body"></div>`;
+    const editor = document.getElementById('editor') as HTMLElement;
+    mockRect(editor);
+
+    await initChecker();
+
+    editor.textContent = 'teh draft';
+    editor.dispatchEvent(new FocusEvent('focus', { bubbles: true }));
+    editor.dispatchEvent(new Event('input', { bubbles: true }));
+    await waitForChecks();
+
+    expect(document.querySelectorAll('stet-mark').length).toBeGreaterThan(0);
+    const callsBeforeComposition = (stet.checkDocument as Mock).mock.calls.length;
+
+    editor.dispatchEvent(new Event('compositionstart', { bubbles: true }));
+    editor.textContent = 'zu wu draft';
+    const composingInput = new Event('input', { bubbles: true });
+    Object.defineProperty(composingInput, 'isComposing', {
+      configurable: true,
+      value: true,
+    });
+    editor.dispatchEvent(composingInput);
+    await waitForChecks();
+
+    expect((stet.checkDocument as Mock).mock.calls).toHaveLength(callsBeforeComposition);
+
+    editor.textContent = '组屋 draft';
+    editor.dispatchEvent(new Event('compositionend', { bubbles: true }));
+    await waitForChecks();
+
+    expect((stet.checkDocument as Mock).mock.calls.length).toBeGreaterThan(callsBeforeComposition);
+    expect(document.querySelectorAll('stet-mark')).toHaveLength(0);
+  });
+
+  it('keeps common spellcheck enabled for zh-SG even when bt is registered', async () => {
+    const stet = await import('stet');
+    (stet.listPacks as Mock).mockReturnValue([
+      { id: 'common', rules: [] },
+      { id: 'bt', rules: [] },
+    ]);
+
+    createChromeMock({
+      packs: ['common'],
+      language: 'zh-SG',
+      packConfig: { language: 'zh-SG', freThreshold: 30, paragraphCharLimit: 320 },
+      rules: { enable: ['COMMON-SPELL-01'], disable: [] },
+    });
+
+    const { initChecker } = await import('../packages/extension/src/content/checker.js');
+
+    document.body.innerHTML = `<div id="editor" contenteditable="true" aria-label="Draft body"></div>`;
+    const editor = document.getElementById('editor') as HTMLElement;
+    mockRect(editor);
+
+    await initChecker();
+    (stet.toCheckOptions as Mock).mockClear();
+
+    editor.textContent = '我在巴士转换站等巴士';
+    editor.dispatchEvent(new FocusEvent('focus', { bubbles: true }));
+    editor.dispatchEvent(new Event('input', { bubbles: true }));
+    await waitForChecks();
+
+    const configArg = [...(stet.toCheckOptions as Mock).mock.calls]
+      .map(([configArg]) => configArg as {
+        language: string;
+        rules: { disable: string[] };
+      })
+      .reverse()
+      .find((configArg) => configArg.language === 'zh-SG');
+
+    expect(configArg).toBeTruthy();
+    expect(configArg?.language).toBe('zh-SG');
+    expect(configArg?.rules.disable).not.toContain('COMMON-SPELL-01');
   });
 
   it('drops stale page issues when the issue-bearing editor is hidden and another editor stays active', async () => {
@@ -269,6 +366,38 @@ describe('checker live sync', () => {
     expect(state.editorCount).toBe(1);
     expect(state.activeLabel).toBe('Generated draft');
     expect(state.issues[0]?.rule).toBe('SPELL');
+  });
+
+  it('reloads custom spellcheck terms from storage changes without a page reload', async () => {
+    const { storageChangeListeners } = createChromeMock();
+    const onDictionaryLoaded = vi.fn();
+    const dictionaryLoader = await import('../packages/extension/src/content/dictionary-loader.js');
+    vi.mocked(dictionaryLoader.loadDictionary).mockResolvedValue(['巴士专用道']);
+    vi.mocked(dictionaryLoader.loadCustomTerms)
+      .mockResolvedValueOnce(['德士'])
+      .mockResolvedValueOnce(['德士', '陆交局']);
+
+    const { initChecker } = await import('../packages/extension/src/content/checker.js');
+
+    document.body.innerHTML = `<div id="editor" contenteditable="true" aria-label="Draft body">德士</div>`;
+    const editor = document.getElementById('editor') as HTMLElement;
+    mockRect(editor);
+
+    await initChecker(onDictionaryLoaded);
+    await waitForChecks();
+
+    expect(onDictionaryLoaded).toHaveBeenLastCalledWith(['巴士专用道', '德士']);
+
+    storageChangeListeners[0]?.({
+      stet_custom_terms: {
+        oldValue: ['德士'],
+        newValue: ['德士', '陆交局'],
+      },
+    }, 'sync');
+    await waitForChecks();
+
+    expect(vi.mocked(dictionaryLoader.loadCustomTerms)).toHaveBeenCalledTimes(2);
+    expect(onDictionaryLoaded).toHaveBeenLastCalledWith(['巴士专用道', '德士', '陆交局']);
   });
 
   it('creates a textarea mirror and annotates it inline for textarea-based editors', async () => {

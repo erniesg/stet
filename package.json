@@ -27,6 +27,7 @@
   ],
   "scripts": {
     "build": "tsup src/index.ts src/config-loader.ts src/cli.ts --format esm,cjs --dts --clean",
+    "build:wordlist:zh-sg": "node scripts/build-zh-sg-wordlist.mjs",
     "test": "vitest run --exclude '**/crash-isolation*'",
     "test:watch": "vitest --exclude '**/crash-isolation*'",
     "test:crash": "npx playwright test tests/crash-isolation.spec.ts",

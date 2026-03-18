@@ -50,6 +50,15 @@ function mockRect(element: HTMLElement, width = 320, height = 120) {
   });
 }
 
+function setGoogleDocsLocation() {
+  Object.defineProperty(window, 'location', {
+    configurable: true,
+    value: new URL('https://docs.google.com/document/d/abc/edit'),
+  });
+
+  document.title = 'Quarterly update - Google Docs';
+}
+
 function createChromeMock() {
   const listeners: RuntimeListener[] = [];
 
@@ -156,5 +165,41 @@ describe('checker safe mode ui', () => {
     expect(popupState.activeFieldKey).toBeTruthy();
     expect(popupState.issues).toHaveLength(1);
     expect(popupState.issues[0]?.rule).toBe('SPELL');
+  });
+
+  it('does not mount the outside-editor issue panel for docs text-only fallbacks', async () => {
+    createChromeMock();
+    setGoogleDocsLocation();
+    const { initChecker } = await import('../packages/extension/src/content/checker.js');
+
+    document.body.innerHTML = `
+      <div id="docs-editor">
+        <div id="docs-root" class="kix-appview-editor">
+          <div class="kix-page-paginated"></div>
+        </div>
+      </div>
+      <iframe class="docs-texteventtarget-iframe"></iframe>
+    `;
+
+    const root = document.getElementById('docs-root') as HTMLElement;
+    const page = root.querySelector('.kix-page-paginated') as HTMLElement;
+    const iframe = document.querySelector('iframe.docs-texteventtarget-iframe') as HTMLIFrameElement;
+    const iframeDoc = document.implementation.createHTMLDocument('');
+    iframeDoc.body.innerHTML = '<div contenteditable="true">teh draft</div>';
+
+    Object.defineProperty(iframe, 'contentDocument', {
+      configurable: true,
+      value: iframeDoc,
+    });
+
+    mockRect(root, 860, 1080);
+    mockRect(page, 820, 1040);
+
+    await initChecker();
+    root.dispatchEvent(new FocusEvent('focus', { bubbles: true }));
+    await waitForChecks();
+
+    expect(document.querySelector('.stet-issues-root')).toBeNull();
+    expect(document.querySelector('.stet-issues-button')).toBeNull();
   });
 });

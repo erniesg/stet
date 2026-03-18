@@ -11,6 +11,7 @@ import type { Issue } from 'stet';
 import {
   collectGoogleDocsIssueRects,
   extractGoogleDocsRenderedText,
+  getGoogleDocsViewportAnchorRect,
   isGoogleDocsSurfaceRoot,
 } from './google-docs-surface.js';
 import { resolveIssueRange } from './issue-range.js';
@@ -20,6 +21,8 @@ const TAG = 'stet-mark';
 const MAX_OVERLAY_MARKS = 50;
 const CARD_VIEWPORT_MARGIN = 8;
 const CARD_GAP = 6;
+const OVERLAY_RECONCILE_DELAY_MS = 96;
+const OVERLAY_FOLLOW_SCROLL_MS = 180;
 
 /** Currently open popup card */
 let activeCard: HTMLElement | null = null;
@@ -170,6 +173,9 @@ function showCard(
 
   const card = document.createElement('div');
   card.className = 'stet-card';
+  if (mark.dataset.stetHost) {
+    card.dataset.stetHost = mark.dataset.stetHost;
+  }
 
   // Header: rule badge + close button
   const header = document.createElement('div');
@@ -273,9 +279,15 @@ export class AnnotationManager {
   private dismissedFingerprints = new Set<string>();
   private overlayTracking = false;
   private overlayRefreshFrame: number | null = null;
+  private overlayReconcileTimer: ReturnType<typeof setTimeout> | null = null;
+  private overlayFollowFrame: number | null = null;
+  private overlayFollowUntil = 0;
   private overlaySuppressed = false;
+  private overlayVisualOffsetX = 0;
+  private overlayVisualOffsetY = 0;
+  private overlayAnchorPosition: { left: number; top: number } | null = null;
 
-  private readonly handleOverlayViewportChange = () => {
+  private readonly handleOverlayViewportChange = (event: Event) => {
     if (this.lastMode !== 'overlay') return;
     if (this.lastIssues.length === 0) return;
     if (this.overlaySuppressed) return;
@@ -283,6 +295,14 @@ export class AnnotationManager {
       this.clear();
       return;
     }
+
+    if (event.type === 'scroll') {
+      this.applyOverlayAnchorDelta();
+      this.startOverlayFollowLoop();
+      this.scheduleOverlayReconcile();
+      return;
+    }
+
     if (this.overlayRefreshFrame !== null) return;
 
     this.overlayRefreshFrame = window.requestAnimationFrame(() => {
@@ -329,6 +349,8 @@ export class AnnotationManager {
       window.cancelAnimationFrame(this.overlayRefreshFrame);
       this.overlayRefreshFrame = null;
     }
+    this.cancelOverlayReconcile();
+    this.stopOverlayFollowLoop();
   }
 
   getRenderedMarkCount(): number {
@@ -485,7 +507,9 @@ export class AnnotationManager {
     const end = Math.max(selectionState.start, selectionState.end);
 
     if (start === end) {
-      return start >= issueStart && start <= issueEnd;
+      // Skip if caret is inside or at end of issue, but not at start
+      // (so first-word issues at offset 0 still get annotated)
+      return start > issueStart && start <= issueEnd;
     }
 
     return issueStart < end && issueEnd > start;
@@ -511,6 +535,10 @@ export class AnnotationManager {
     }
     this.overlayMarks = [];
     this.overlaySuppressed = false;
+    this.resetOverlayVisualOffset();
+    this.cancelOverlayReconcile();
+    this.stopOverlayFollowLoop();
+    this.overlayAnchorPosition = null;
     if (this.overlayRoot) {
       this.overlayRoot.remove();
       this.overlayRoot = null;
@@ -619,7 +647,6 @@ export class AnnotationManager {
     const clearedMarks = this.getRenderedMarkCount();
     this.clear();
     if (issues.length === 0) {
-      this.restoreSelection(selectionBefore, this.buildNodeMap());
       logHistoryEvent('checker:annotate', {
         ...getAnnotationElementLogData(this.element),
         mode: 'inline',
@@ -726,7 +753,10 @@ export class AnnotationManager {
       }
     }
 
-    this.restoreSelection(selectionBefore, this.buildNodeMap());
+    // Do NOT restore selection — surroundContents changes the DOM structure
+    // and restoreSelection can misplace the caret. The intersectsActiveSelection
+    // skip ensures no mark wraps the text node at the cursor, so the browser
+    // maintains cursor position naturally through the remote DOM changes.
     logHistoryEvent('checker:annotate', {
       ...getAnnotationElementLogData(this.element),
       mode: 'inline',
@@ -817,6 +847,7 @@ export class AnnotationManager {
       this.stopOverlayTracking();
     } else {
       this.startOverlayTracking();
+      this.captureOverlayAnchorPosition();
     }
 
     if (logResult) {
@@ -842,10 +873,104 @@ export class AnnotationManager {
     const root = document.createElement('div');
     root.className = 'stet-overlay-root';
     root.setAttribute('aria-hidden', 'true');
+    if (isGoogleDocsSurfaceRoot(this.element)) {
+      root.dataset.stetHost = 'google-docs';
+    }
     root.hidden = this.overlaySuppressed;
     (document.body ?? document.documentElement).appendChild(root);
     this.overlayRoot = root;
     return root;
+  }
+
+  private cancelOverlayReconcile(): void {
+    if (this.overlayReconcileTimer === null) return;
+    window.clearTimeout(this.overlayReconcileTimer);
+    this.overlayReconcileTimer = null;
+  }
+
+  private scheduleOverlayReconcile(): void {
+    this.cancelOverlayReconcile();
+    this.overlayReconcileTimer = window.setTimeout(() => {
+      this.overlayReconcileTimer = null;
+      if (this.lastMode !== 'overlay') return;
+      if (this.lastIssues.length === 0) return;
+      if (this.overlaySuppressed) return;
+      if (!this.element.isConnected) {
+        this.clear();
+        return;
+      }
+      this.renderOverlayAnnotations(this.getVisibleIssues(this.lastIssues), false);
+    }, OVERLAY_RECONCILE_DELAY_MS);
+  }
+
+  private resetOverlayVisualOffset(): void {
+    this.overlayVisualOffsetX = 0;
+    this.overlayVisualOffsetY = 0;
+    if (this.overlayRoot) {
+      this.overlayRoot.style.transform = '';
+    }
+  }
+
+  private applyOverlayVisualOffset(deltaX: number, deltaY: number): void {
+    if (!this.overlayRoot) return;
+    if (deltaX === 0 && deltaY === 0) return;
+
+    this.overlayVisualOffsetX += deltaX;
+    this.overlayVisualOffsetY += deltaY;
+    this.overlayRoot.style.transform =
+      `translate3d(${this.overlayVisualOffsetX}px, ${this.overlayVisualOffsetY}px, 0)`;
+  }
+
+  private captureOverlayAnchorPosition(): void {
+    this.overlayAnchorPosition = this.getOverlayAnchorPosition();
+  }
+
+  private getOverlayAnchorPosition(): { left: number; top: number } | null {
+    const rect = isGoogleDocsSurfaceRoot(this.element)
+      ? (getGoogleDocsViewportAnchorRect(this.element) ?? this.element.getBoundingClientRect())
+      : this.element.getBoundingClientRect();
+
+    if (!rect || (rect.width === 0 && rect.height === 0)) return null;
+
+    return {
+      left: rect.left + window.scrollX,
+      top: rect.top + window.scrollY,
+    };
+  }
+
+  private applyOverlayAnchorDelta(): void {
+    const position = this.getOverlayAnchorPosition();
+    if (!position) return;
+
+    const previous = this.overlayAnchorPosition;
+    this.overlayAnchorPosition = position;
+    if (!previous) return;
+
+    this.applyOverlayVisualOffset(position.left - previous.left, position.top - previous.top);
+  }
+
+  private startOverlayFollowLoop(): void {
+    this.overlayFollowUntil = performance.now() + OVERLAY_FOLLOW_SCROLL_MS;
+    if (this.overlayFollowFrame !== null) return;
+
+    const tick = () => {
+      this.overlayFollowFrame = null;
+      if (this.lastMode !== 'overlay' || this.overlaySuppressed || !this.element.isConnected) return;
+
+      this.applyOverlayAnchorDelta();
+      if (performance.now() >= this.overlayFollowUntil) return;
+
+      this.overlayFollowFrame = window.requestAnimationFrame(tick);
+    };
+
+    this.overlayFollowFrame = window.requestAnimationFrame(tick);
+  }
+
+  private stopOverlayFollowLoop(): void {
+    this.overlayFollowUntil = 0;
+    if (this.overlayFollowFrame === null) return;
+    window.cancelAnimationFrame(this.overlayFollowFrame);
+    this.overlayFollowFrame = null;
   }
 
   private isWithinManagedUi(target: Element): boolean {
@@ -902,6 +1027,7 @@ export class AnnotationManager {
     mark.dataset.rule = issue.rule;
     mark.dataset.severity = issue.severity;
     mark.dataset.stetAnnotationMark = 'true';
+    if (isGoogleDocsSurfaceRoot(this.element)) mark.dataset.stetHost = 'google-docs';
     if (issue.issueId) mark.dataset.issueId = issue.issueId;
     if (issue.fingerprint) mark.dataset.fingerprint = issue.fingerprint;
 
@@ -970,6 +1096,9 @@ export class AnnotationManager {
     document.removeEventListener('scroll', this.handleOverlayViewportChange, true);
     document.removeEventListener('pointerdown', this.handleDocumentPointerDown, true);
     document.removeEventListener('focusin', this.handleDocumentFocusIn, true);
+    this.cancelOverlayReconcile();
+    this.stopOverlayFollowLoop();
+    this.overlayAnchorPosition = null;
   }
 }
 

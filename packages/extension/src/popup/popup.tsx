@@ -1,9 +1,17 @@
 import { render } from 'preact';
 import { useEffect, useRef, useState } from 'preact/hooks';
+import type { Language } from 'stet';
 import { diffText } from '../content/version-history-diff.js';
 import { createInlineDiff, createDiffStat } from '../shared/diff-renderer.js';
 import type { EditableHistoryRecord, VersionSnapshot } from '../content/version-history-core.js';
 import { normalizeSiteAllowlist } from '../host-access.js';
+import {
+  getActiveProfileId,
+  getProfileLanguage,
+  listLanguageOptions,
+  listProfiles,
+  resolveLanguageSetting,
+} from '../storage/profiles.js';
 import { getHistoryRefreshTarget } from './popup-sync.js';
 
 const COLORS = {
@@ -20,6 +28,9 @@ const ROLES = [
   { id: 'journalist', label: 'Journalist', desc: 'House style only — readability off' },
   { id: 'subeditor', label: 'Sub-editor', desc: 'Everything — readability, style, grammar' },
 ];
+const PROFILES = listProfiles();
+const LANGUAGE_OPTIONS = listLanguageOptions();
+type LanguageSetting = typeof LANGUAGE_OPTIONS[number]['id'];
 
 interface PopupIssue {
   key: string;
@@ -87,10 +98,17 @@ function formatSuggestion(issue: PopupIssue): string {
   return `${issue.originalText} -> ${replacement}`;
 }
 
+type PopupView = 'main' | 'settings';
+
 function Popup() {
+  const [view, setView] = useState<PopupView>('main');
   const [enabled, setEnabled] = useState(true);
   const [packs, setPacks] = useState<string[]>([]);
   const [role, setRole] = useState('journalist');
+  const [profileId, setProfileId] = useState('standard');
+  const [languageSetting, setLanguageSetting] = useState<LanguageSetting>('base');
+  const [profileLanguage, setProfileLanguage] = useState<Language>('en-GB');
+  const [effectiveLanguage, setEffectiveLanguage] = useState('en-GB');
   const [loading, setLoading] = useState(true);
   const [activeTabId, setActiveTabId] = useState<number | null>(null);
   const [activeHostname, setActiveHostname] = useState<string | null>(null);
@@ -120,24 +138,44 @@ function Popup() {
   const historyDiff = selectedSnapshot && historyLiveEditorAvailable
     ? diffText(historyCurrentText, selectedSnapshot.content)
     : null;
+  const activeProfile = PROFILES.find((profile) => profile.id === profileId) ?? PROFILES[0];
+  const activeLanguageOption = LANGUAGE_OPTIONS.find((option) => option.id === languageSetting) ?? LANGUAGE_OPTIONS[0];
   const currentSiteScoped = activeHostname
     ? siteAllowlist.length === 0 || siteAllowlist.some((entry) => activeHostname === entry || activeHostname.endsWith(`.${entry}`))
     : false;
 
-  useEffect(() => {
+  const loadConfigState = () => {
     chrome.runtime.sendMessage({ type: 'GET_SETTINGS' }, (resp) => {
       if (resp?.config) {
         setEnabled(resp.config.enabled);
         setPacks(resp.config.packs || []);
         setRole(resp.config.role || 'journalist');
+        setEffectiveLanguage(resp.config.language || 'en-GB');
       }
       setLoading(false);
     });
 
     chrome.runtime.sendMessage({ type: 'GET_RAW_SETTINGS' }, (resp) => {
-      setSiteAllowlist(normalizeSiteAllowlist(resp?.userOverrides?.siteAllowlist));
-    });
+      const nextProfileId = getActiveProfileId(resp?.userOverrides?.profileId, resp?.resolvedConfig);
+      const nextProfileLanguage = getProfileLanguage(resp?.resolvedConfig ?? null, nextProfileId);
+      const nextLanguageSetting = resolveLanguageSetting(resp?.userOverrides?.language, nextProfileLanguage);
 
+      setSiteAllowlist(normalizeSiteAllowlist(resp?.userOverrides?.siteAllowlist));
+      setProfileId(nextProfileId);
+      setProfileLanguage(nextProfileLanguage);
+      setLanguageSetting(nextLanguageSetting);
+
+      if (resp?.userOverrides?.language && nextLanguageSetting === 'base') {
+        chrome.runtime.sendMessage({
+          type: 'UPDATE_USER_OVERRIDES',
+          overrides: { language: undefined },
+        });
+      }
+    });
+  };
+
+  useEffect(() => {
+    loadConfigState();
     loadPageIssues(setIssuesState, setIssuesError, setActiveTabId);
     withActiveTabInfo((tabId, url) => {
       setActiveTabId(tabId);
@@ -251,20 +289,49 @@ function Popup() {
     }
   };
 
+  const reloadConfigAndRefresh = () => {
+    loadConfigState();
+    withActiveTab((tabId) => {
+      chrome.tabs.sendMessage(tabId, { type: 'RELOAD_CONFIG_AND_RECHECK' }, () => {
+        if (chrome.runtime.lastError) { /* tab may not have content script */ }
+        refreshIssues();
+      });
+    });
+  };
+
   const changeRole = (newRole: string) => {
     setRole(newRole);
-    // Save override first, then reload content script config once save is confirmed
     chrome.runtime.sendMessage({
       type: 'UPDATE_USER_OVERRIDES',
       overrides: { role: newRole },
     }, () => {
-      // Save confirmed — now tell the content script to reload and re-check
-      withActiveTab((tabId) => {
-        chrome.tabs.sendMessage(tabId, { type: 'RELOAD_CONFIG_AND_RECHECK' }, () => {
-          if (chrome.runtime.lastError) { /* tab may not have content script */ }
-          refreshIssues();
-        });
-      });
+      reloadConfigAndRefresh();
+    });
+  };
+
+  const changeProfile = (newProfileId: string) => {
+    setProfileId(newProfileId);
+    chrome.runtime.sendMessage({
+      type: 'APPLY_PROFILE',
+      profileId: newProfileId,
+    }, () => {
+      reloadConfigAndRefresh();
+    });
+  };
+
+  const changeLanguage = (nextLanguage: LanguageSetting) => {
+    const explicitLanguage = nextLanguage === 'base' || nextLanguage === profileLanguage
+      ? undefined
+      : nextLanguage;
+
+    setLanguageSetting(resolveLanguageSetting(explicitLanguage, profileLanguage));
+    chrome.runtime.sendMessage({
+      type: 'UPDATE_USER_OVERRIDES',
+      overrides: {
+        language: explicitLanguage,
+      },
+    }, () => {
+      reloadConfigAndRefresh();
     });
   };
 
@@ -505,20 +572,30 @@ function Popup() {
           <div style={styles.logo}>S</div>
           <span style={styles.title}>{chrome.runtime.getManifest().name}</span>
         </div>
-        <button
-          onClick={toggle}
-          style={{
-            ...styles.toggle,
-            background: enabled ? COLORS.green : COLORS.gray,
-          }}
-        >
-          <div
+        <div style={styles.headerActions}>
+          <button
+            type="button"
+            onClick={() => setView(view === 'settings' ? 'main' : 'settings')}
+            style={styles.gearButton}
+            title="Settings"
+          >
+            {view === 'settings' ? '\u2190' : '\u2699'}
+          </button>
+          <button
+            onClick={toggle}
             style={{
-              ...styles.toggleKnob,
-              transform: enabled ? 'translateX(16px)' : 'translateX(0)',
+              ...styles.toggle,
+              background: enabled ? COLORS.green : COLORS.gray,
             }}
-          />
-        </button>
+          >
+            <div
+              style={{
+                ...styles.toggleKnob,
+                transform: enabled ? 'translateX(16px)' : 'translateX(0)',
+              }}
+            />
+          </button>
+        </div>
       </div>
 
       <div style={styles.status}>
@@ -533,51 +610,83 @@ function Popup() {
         </span>
       </div>
 
+      {view === 'settings' ? (
+        <>
+          <div style={styles.helper}>
+            Manage allowed sites and extension preferences.
+          </div>
+
+          <div style={styles.section}>
+            <span style={styles.sectionLabel}>Allowed Sites</span>
+            <div style={styles.issueMeta}>
+              {activeHostname
+                ? currentSiteScoped
+                  ? `Current site enabled: ${activeHostname}`
+                  : `Current site not in allowlist: ${activeHostname}`
+                : 'Current site unavailable.'}
+            </div>
+            <div style={styles.issueMeta}>
+              {`${siteAllowlist.length} site${siteAllowlist.length === 1 ? '' : 's'} allowed.`}
+            </div>
+
+            <div style={styles.allowlistItems}>
+              {siteAllowlist.map((entry) => (
+                <div key={entry} style={styles.allowlistItem}>
+                  <span style={styles.allowlistItemText}>{entry}</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      saveSiteAllowlist(siteAllowlist.filter((e) => e !== entry));
+                      if (activeHostname === entry && activeTabId !== null) chrome.tabs.reload(activeTabId);
+                    }}
+                    style={styles.allowlistRemoveBtn}
+                  >{'\u00d7'}</button>
+                </div>
+              ))}
+            </div>
+
+            <div style={styles.roleGroup}>
+              {activeHostname && !currentSiteScoped && (
+                <button type="button" onClick={addCurrentSiteToAllowlist} style={styles.roleBtn}>
+                  <span style={{ fontWeight: '500', fontSize: '12px' }}>Add current site</span>
+                </button>
+              )}
+            </div>
+          </div>
+
+          <div style={styles.section}>
+            <span style={styles.sectionLabel}>Language</span>
+            <div style={styles.roleGroup}>
+              {LANGUAGE_OPTIONS.filter((o) => o.id !== 'base').map((option) => (
+                <button
+                  key={option.id}
+                  onClick={() => changeLanguage(option.id)}
+                  style={{
+                    ...styles.roleBtn,
+                    background: effectiveLanguage === option.id ? COLORS.primary : '#fff',
+                    color: effectiveLanguage === option.id ? '#fff' : '#374151',
+                    borderColor: effectiveLanguage === option.id ? COLORS.primary : COLORS.border,
+                  }}
+                >
+                  <span style={{ fontWeight: '500', fontSize: '12px' }}>{option.label}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div style={styles.section}>
+            <div style={styles.configRow}>
+              <span style={styles.sectionLabel}>Advanced</span>
+              <button type="button" style={styles.linkButton} onClick={openOptions}>
+                Options page
+              </button>
+            </div>
+          </div>
+        </>
+      ) : (
+        <>
       <div style={styles.helper}>
         Review issues and local version history here.
-      </div>
-
-      <div style={styles.section}>
-        <div style={styles.configRow}>
-          <span style={styles.sectionLabel}>Site Scope</span>
-          <button type="button" style={styles.linkButton} onClick={openOptions}>
-            Options
-          </button>
-        </div>
-        <div style={styles.issueMeta}>
-          {activeHostname
-            ? currentSiteScoped
-              ? `Current site enabled: ${activeHostname}`
-              : `Current site blocked by allowlist: ${activeHostname}`
-            : 'Current site unavailable.'}
-        </div>
-        <div style={styles.issueMeta}>
-          {siteAllowlist.length === 0
-            ? 'Stet currently runs on all sites.'
-            : `Allowlist active: ${siteAllowlist.length} site${siteAllowlist.length === 1 ? '' : 's'}.`}
-        </div>
-        <div style={styles.roleGroup}>
-          {activeHostname && siteAllowlist.length === 0 && (
-            <button type="button" onClick={enableOnlyCurrentSite} style={styles.roleBtn}>
-              <span style={{ fontWeight: '500', fontSize: '12px' }}>Only this site</span>
-            </button>
-          )}
-          {activeHostname && siteAllowlist.length > 0 && !currentSiteScoped && (
-            <button type="button" onClick={addCurrentSiteToAllowlist} style={styles.roleBtn}>
-              <span style={{ fontWeight: '500', fontSize: '12px' }}>Enable here</span>
-            </button>
-          )}
-          {activeHostname && siteAllowlist.length > 0 && currentSiteScoped && (
-            <button type="button" onClick={removeCurrentSiteFromAllowlist} style={styles.roleBtn}>
-              <span style={{ fontWeight: '500', fontSize: '12px' }}>Remove site</span>
-            </button>
-          )}
-          {siteAllowlist.length > 0 && (
-            <button type="button" onClick={allowEverywhere} style={styles.roleBtn}>
-              <span style={{ fontWeight: '500', fontSize: '12px' }}>Allow everywhere</span>
-            </button>
-          )}
-        </div>
       </div>
 
       <div style={styles.section}>
@@ -607,6 +716,9 @@ function Popup() {
         <div style={styles.configRow}>
           <span style={styles.sectionLabel}>Packs</span>
           <span style={styles.valueText}>{packs.join(', ') || 'common'}</span>
+        </div>
+        <div style={styles.issueMeta}>
+          Effective language: {effectiveLanguage}
         </div>
       </div>
 
@@ -820,6 +932,9 @@ function Popup() {
           </>
         )}
       </div>
+
+      </>
+      )}
 
       <div style={styles.footer}>
         <span style={styles.footerText}>"Let it stand."</span>
@@ -1045,6 +1160,21 @@ const styles: Record<string, Record<string, string | number>> = {
     justifyContent: 'space-between',
     marginBottom: '12px',
   },
+  headerActions: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+  },
+  gearButton: {
+    background: 'none',
+    border: 'none',
+    cursor: 'pointer',
+    fontSize: '18px',
+    color: COLORS.gray,
+    padding: '2px 4px',
+    lineHeight: '1',
+    borderRadius: '4px',
+  },
   logoRow: {
     display: 'flex',
     alignItems: 'center',
@@ -1137,6 +1267,7 @@ const styles: Record<string, Record<string, string | number>> = {
   roleGroup: {
     display: 'flex',
     gap: '6px',
+    flexWrap: 'wrap',
   },
   roleBtn: {
     flex: '1',
@@ -1339,6 +1470,36 @@ const styles: Record<string, Record<string, string | number>> = {
   disabledButton: {
     opacity: 0.55,
     cursor: 'not-allowed',
+  },
+  allowlistItems: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '4px',
+    marginTop: '6px',
+    marginBottom: '6px',
+  },
+  allowlistItem: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: '5px 8px',
+    background: COLORS.lightBg,
+    borderRadius: '6px',
+    fontSize: '12px',
+  },
+  allowlistItemText: {
+    color: COLORS.text,
+    fontFamily: 'monospace',
+    fontSize: '11px',
+  },
+  allowlistRemoveBtn: {
+    background: 'none',
+    border: 'none',
+    cursor: 'pointer',
+    color: COLORS.gray,
+    fontSize: '14px',
+    padding: '0 2px',
+    lineHeight: '1',
   },
   footer: {
     borderTop: `1px solid ${COLORS.border}`,

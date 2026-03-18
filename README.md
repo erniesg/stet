@@ -89,6 +89,16 @@ rules:
     - COMMON-ADV-01        # too noisy for us
 ```
 
+`language` accepts `en-GB`, `en-US`, and `zh-SG`.
+
+## Chinese spellcheck
+
+Set `language: zh-SG` to switch `COMMON-SPELL-01` to a bundled Chinese wordlist. The extension ships `data/wordlist-zh-sg.txt`, and custom spellcheck terms are merged from `chrome.storage.sync` under `stet_custom_terms`.
+
+Chinese support is currently dictionary-based spellcheck. The rest of the common readability pack remains English-oriented.
+
+The extension options page and popup include demo profile and language toggles. The `Singapore Chinese` profile keeps the current newsroom/product config intact, switches the checker to `zh-SG`, and limits the common pack to `COMMON-SPELL-01`. Editors can still force `en-GB`, `en-US`, or `zh-SG` directly and add newsroom-specific custom terms from the UI.
+
 ## Custom packs
 
 ```typescript

@@ -257,4 +257,41 @@ describe('background tab issue sync', () => {
       expect.any(Function),
     );
   });
+
+  it('applying a profile clears stale language and role overrides', async () => {
+    const backing: StorageBacking = {
+      sync: {
+        userOverrides: {
+          profileId: 'standard',
+          language: 'en-GB',
+          role: 'subeditor',
+          disableRules: ['COMMON-SPELL-01'],
+          siteAllowlist: ['docs.google.com'],
+          enabled: true,
+        },
+      },
+      local: {},
+      session: {},
+    };
+    const chromeMock = setupChromeMock(backing);
+    await import('../packages/extension/src/background/service-worker.js');
+
+    const listener = chromeMock.runtimeListeners.at(-1);
+    expect(listener).toBeTruthy();
+
+    const response = await dispatchRuntimeMessage(listener!, {
+      type: 'APPLY_PROFILE',
+      profileId: 'sg-chinese',
+    }) as { ok: boolean; profileId: string };
+
+    expect(response).toEqual({ ok: true, profileId: 'sg-chinese' });
+    expect(backing.sync.userOverrides).toEqual({
+      profileId: 'sg-chinese',
+      language: undefined,
+      role: undefined,
+      disableRules: undefined,
+      siteAllowlist: ['docs.google.com'],
+      enabled: true,
+    });
+  });
 });

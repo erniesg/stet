@@ -13,6 +13,7 @@ import { checkSentenceReadability } from './rules/sentence-readability.js';
 import { checkRedundancies } from './rules/redundancies.js';
 import { checkCapitalization } from './rules/capitalization.js';
 import { checkSpelling, loadCommonDictionary } from './rules/spellcheck.js';
+import { checkZhSgTerminology } from './rules/zh-sg-terminology.js';
 
 export const commonPack: RulePack = {
   id: 'common',
@@ -118,6 +119,14 @@ export const commonPack: RulePack = {
       severity: 'warning',
       check: checkSpelling,
       description: 'Flags words missing from the loaded dictionary.',
+    },
+    {
+      id: 'COMMON-ZHSG-TERM-01',
+      name: 'SG Chinese terminology',
+      category: 'terminology',
+      severity: 'warning',
+      check: checkZhSgTerminology,
+      description: 'Flags non-standard Chinese terms and suggests official Singapore equivalents.',
     },
   ],
 };

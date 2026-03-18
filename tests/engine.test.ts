@@ -364,6 +364,16 @@ describe('resolveConfig()', () => {
     expect(resolved.role).toBe('editor');
   });
 
+  it('accepts zh-SG as a supported config language', () => {
+    const raw: StetConfig = {
+      packs: ['common'],
+      language: 'zh-SG',
+    };
+    const resolved = resolveConfig(raw);
+    expect(resolved.language).toBe('zh-SG');
+    expect(resolved.packConfig.language).toBe('zh-SG');
+  });
+
   it('resolves rule enable/disable', () => {
     const raw: StetConfig = {
       packs: ['common'],
@@ -396,15 +406,20 @@ describe('applyUserOverrides()', () => {
     const base = DEFAULT_RESOLVED_CONFIG;
     const result = applyUserOverrides(base, {
       enabled: false,
+      language: 'en-US',
       role: 'editor',
       debounceMs: 1000,
     });
     expect(result.enabled).toBe(false);
+    expect(result.language).toBe('en-US');
+    expect(result.packConfig.language).toBe('en-US');
     expect(result.role).toBe('editor');
     expect(result.debounceMs).toBe(1000);
     // Base unchanged
     expect(base.enabled).toBe(true);
-    expect(base.role).toBe('subeditor');
+    expect(base.language).toBe('en-GB');
+    expect(base.packConfig.language).toBeUndefined();
+    expect(base.role).toBe('journalist');
   });
 
   it('merges disabled rules', () => {

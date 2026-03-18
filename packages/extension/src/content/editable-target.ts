@@ -122,7 +122,7 @@ export function getAnnotationSupport(element: HTMLElement): AnnotationSupport {
   }
 
   if (hasRegisteredHostEditable(element)) {
-    return { mode: 'overlay', reason: 'host-managed-editor' };
+    return { mode: 'inline', reason: 'host-registered-editor' };
   }
 
   if (!hasEnabledContentEditable(element)) {
@@ -132,11 +132,7 @@ export function getAnnotationSupport(element: HTMLElement): AnnotationSupport {
     };
   }
 
-  if (hasSafeInlineAnnotationMarkup(element) && !hasHostManagedEditorMarker(element)) {
-    return { mode: 'inline', reason: 'safe-rich-text-dom' };
-  }
-
-  return { mode: 'overlay', reason: 'host-managed-editor' };
+  return { mode: 'inline', reason: 'contenteditable' };
 }
 
 export function supportsInlineAnnotationMarkup(element: HTMLElement): boolean {

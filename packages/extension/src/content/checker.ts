@@ -15,8 +15,10 @@ import { AnnotationManager, isCardOpen } from './annotation-manager.js';
 import { loadDictionary, loadCustomTerms } from './dictionary-loader.js';
 import {
   applyGoogleDocsReplacement,
+  getGoogleDocsInputTargetDocument,
   rememberGoogleDocsCaret,
 } from './google-docs-write.js';
+import { isGoogleDocsChromeMutation } from './google-docs-surface.js';
 import {
   discoverHistoryEditables,
   findHistoryEditable,
@@ -69,11 +71,21 @@ let domObserver: MutationObserver | null = null;
 let dictionaryLoadPromise: Promise<string[]> | null = null;
 let historyTrackingRegistered = false;
 let historyFeatureEnabled = true;
+let storageChangeListenerRegistered = false;
+let compositionTrackingRegistered = false;
 const CHECKER_MARK_SELECTOR = 'stet-mark';
 const INPUT_MUTATION_SUPPRESS_MS = 750;
 const recentInputAt = new WeakMap<HTMLElement, number>();
 const DISCOVERY_ATTRIBUTE_FILTER = ['style', 'class', 'hidden', 'aria-hidden', 'contenteditable', 'role'];
 // let issuePanel: IssuePanelManager | null = null;
+const composingEditables = new WeakSet<HTMLElement>();
+const googleDocsCompositionBridges = new WeakMap<HTMLElement, {
+  doc: Document;
+  start: EventListener;
+  end: EventListener;
+  input: EventListener;
+}>();
+const STET_OWNED_SELECTOR = '.stet-overlay-root, .stet-history-root, .stet-card, .stet-issues-root';
 
 interface PopupIssueRecord {
   key: string;
@@ -186,6 +198,7 @@ function extractParagraphs(text: string): { headline?: string; body: string[] } 
 
 function getIssues(element: HTMLElement, text = readEditableText(element)): Issue[] {
   if (!config || !config.enabled) return [];
+  if (!isHostAllowed(window.location.hostname, config.siteAllowlist)) return [];
   if (!text.trim()) return [];
 
   const { headline, body } = extractParagraphs(text);
@@ -276,7 +289,7 @@ function filterIgnoredIssues(element: HTMLElement, issues: Issue[]): Issue[] {
 function rememberElementIssues(element: HTMLElement, issues: Issue[]) {
   latestIssues.set(element, issues);
   getOrCreateManager(element)?.setIssues(issues);
-  // getIssuePanel().updateIssues(element, issues);
+  syncIssuePanelElementIssues(element, issues);
 }
 
 function publishElementIssues(element: HTMLElement, issues: Issue[]) {
@@ -306,12 +319,42 @@ function clearVisibleIssuesForPendingEdit(element: HTMLElement) {
   publishElementIssues(element, []);
 }
 
-function runCheckAndAnnotate(element: HTMLElement) {
-  if (selfMutating) return;
+function clearScheduledCheck(element: HTMLElement) {
+  const existing = timers.get(element);
+  if (existing) clearTimeout(existing);
+  timers.delete(element);
+}
 
-  // While a popup card is open, defer annotation rebuild so the card is not
-  // destroyed mid-interaction (Bug 2).  Re-schedule so the check runs once the
-  // card is dismissed.
+function isComposingEvent(event: Event): boolean {
+  return 'isComposing' in event && Boolean((event as Event & { isComposing?: boolean }).isComposing);
+}
+
+function isEditableComposing(element: HTMLElement): boolean {
+  return composingEditables.has(element);
+}
+
+function markCompositionStart(element: HTMLElement) {
+  if (composingEditables.has(element)) return;
+
+  composingEditables.add(element);
+  recentInputAt.set(element, getNow());
+  clearScheduledCheck(element);
+  recordHistoryEventRate('checker:composition-start', getCheckerElementLogData(element));
+}
+
+function markCompositionEnd(element: HTMLElement) {
+  if (!composingEditables.has(element)) return;
+
+  composingEditables.delete(element);
+  recentInputAt.set(element, getNow());
+  clearVisibleIssuesForPendingEdit(element);
+  recordHistoryEventRate('checker:composition-end', getCheckerElementLogData(element));
+  scheduleCheck(element);
+}
+
+function runCheckAndAnnotate(element: HTMLElement) {
+  if (selfMutating || isEditableComposing(element)) return;
+
   if (isCardOpen()) {
     scheduleCheck(element);
     return;
@@ -355,7 +398,7 @@ function runCheckAndAnnotate(element: HTMLElement) {
 
   const annotationSupport = getAnnotationSupport(element);
   const canRenderAnnotations = annotationSupport.mode !== 'panel';
-  const annotationMode = annotationSupport.mode === 'inline' ? 'inline' : 'overlay';
+  const annotationMode = annotationSupport.mode === 'overlay' ? 'overlay' : 'inline';
 
   logHistoryEvent('checker:pre-annotate', {
     ...getCheckerElementLogData(element),
@@ -393,9 +436,8 @@ function runCheckAndAnnotate(element: HTMLElement) {
 }
 
 function scheduleCheck(element: HTMLElement) {
-  if (selfMutating) return;
-  const existing = timers.get(element);
-  if (existing) clearTimeout(existing);
+  if (selfMutating || isEditableComposing(element)) return;
+  clearScheduledCheck(element);
   const delay = config?.debounceMs ?? 800;
   recordHistoryEventRate('checker:schedule', {
     ...getCheckerElementLogData(element),
@@ -411,8 +453,7 @@ function scheduleCheck(element: HTMLElement) {
 }
 
 function scheduleInitialCheck(element: HTMLElement, delay = 300) {
-  const existing = timers.get(element);
-  if (existing) clearTimeout(existing);
+  clearScheduledCheck(element);
 
   const timer = setTimeout(() => {
     if (timers.get(element) === timer) {
@@ -425,14 +466,13 @@ function scheduleInitialCheck(element: HTMLElement, delay = 300) {
 }
 
 function cleanupTrackedEditable(element: HTMLElement) {
+  clearScheduledCheck(element);
+  composingEditables.delete(element);
+  unregisterGoogleDocsCompositionBridge(element);
   managers.get(element)?.destroy();
   managers.delete(element);
   trackedEditables.delete(element);
   latestIssues.delete(element);
-  // getIssuePanel().removeElement(element);
-  const timer = timers.get(element);
-  if (timer) clearTimeout(timer);
-  timers.delete(element);
 }
 
 function getResolvedEditableElement(element: HTMLElement): HTMLElement | null {
@@ -510,8 +550,6 @@ function getPageIssueCount(): number {
 }
 
 function syncPageState() {
-  // getIssuePanel().setActiveElement(getPreferredPopupElement());
-
   try {
     chrome.runtime.sendMessage({
       type: 'SYNC_PAGE_ISSUES',
@@ -531,12 +569,7 @@ function getEditorCount(): number {
   return total;
 }
 
-// function getIssuePanel(): IssuePanelManager {
-//   if (!issuePanel) {
-//     issuePanel = new IssuePanelManager(applySelectedFixes);
-//   }
-//   return issuePanel;
-// }
+// Issue panel removed — popup shows issues instead.
 
 function getTrackedEditable(start: EventTarget | null): HTMLElement | null {
   const editable = findHistoryEditable(start);
@@ -627,6 +660,10 @@ function getPreferredPopupElement(): HTMLElement | null {
   }
 
   return null;
+}
+
+function syncIssuePanelElementIssues(_element: HTMLElement, _issues: Issue[]) {
+  // Issue panel disabled — popup shows issues instead.
 }
 
 function serializeIssue(issue: Issue): PopupIssueRecord {
@@ -974,6 +1011,69 @@ function registerLateEditableDiscovery() {
   }, true);
 }
 
+function registerCompositionTracking() {
+  if (compositionTrackingRegistered) return;
+  compositionTrackingRegistered = true;
+
+  document.addEventListener('compositionstart', (event) => {
+    const editable = getTrackableEditable(event.target);
+    if (!editable) return;
+
+    attachListener(editable);
+    activeElement = editable;
+    markCompositionStart(editable);
+  }, true);
+
+  document.addEventListener('compositionend', (event) => {
+    const editable = getTrackableEditable(event.target);
+    if (!editable) return;
+
+    attachListener(editable);
+    markCompositionEnd(editable);
+  }, true);
+}
+
+function registerGoogleDocsCompositionBridge(element: HTMLElement) {
+  if (!isGoogleDocsEditableRoot(element) || googleDocsCompositionBridges.has(element)) return;
+
+  const inputDoc = getGoogleDocsInputTargetDocument(element.ownerDocument ?? document);
+  if (!inputDoc) return;
+
+  const handleStart: EventListener = () => {
+    activeElement = element;
+    markCompositionStart(element);
+  };
+  const handleEnd: EventListener = () => {
+    markCompositionEnd(element);
+  };
+  const handleInput: EventListener = (event) => {
+    recentInputAt.set(element, getNow());
+    if (!isComposingEvent(event)) return;
+    activeElement = element;
+    markCompositionStart(element);
+  };
+
+  inputDoc.addEventListener('compositionstart', handleStart, true);
+  inputDoc.addEventListener('compositionend', handleEnd, true);
+  inputDoc.addEventListener('input', handleInput, true);
+  googleDocsCompositionBridges.set(element, {
+    doc: inputDoc,
+    start: handleStart,
+    end: handleEnd,
+    input: handleInput,
+  });
+}
+
+function unregisterGoogleDocsCompositionBridge(element: HTMLElement) {
+  const bridge = googleDocsCompositionBridges.get(element);
+  if (!bridge) return;
+
+  bridge.doc.removeEventListener('compositionstart', bridge.start, true);
+  bridge.doc.removeEventListener('compositionend', bridge.end, true);
+  bridge.doc.removeEventListener('input', bridge.input, true);
+  googleDocsCompositionBridges.delete(element);
+}
+
 function registerRuntimeHandlers() {
   if (runtimeHandlersRegistered) return;
   runtimeHandlersRegistered = true;
@@ -982,9 +1082,7 @@ function registerRuntimeHandlers() {
     chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       if (message?.type === 'RELOAD_CONFIG_AND_RECHECK') {
         loadConfig().then((newConfig) => {
-          // Preserve actual registered packs
-          const registered = listPacks().map(p => p.id);
-          config = { ...newConfig, packs: registered };
+          config = resolveRuntimeConfig(newConfig);
           refreshAllChecks();
           syncPageState();
           sendResponse(getPopupIssuesState());
@@ -1080,6 +1178,7 @@ function refreshAllChecks() {
     const target = getResolvedEditableElement(element);
     if (!target) continue;
     attachListener(target);
+    if (isEditableComposing(target)) continue;
     runCheckAndAnnotate(target);
   }
 }
@@ -1104,14 +1203,24 @@ function attachListener(el: HTMLElement) {
   trackedEditables.add(el);
   // Disable browser spellcheck — stet handles it
   el.spellcheck = false;
+  registerGoogleDocsCompositionBridge(el);
   if (getAnnotationSupport(el).mode !== 'panel') {
     managers.set(el, createAnnotationManager(el));
   }
   logHistoryEvent('checker:attach', getCheckerElementLogData(el));
 
-  el.addEventListener('input', () => {
+  el.addEventListener('input', (event) => {
     if (selfMutating) return;
     recentInputAt.set(el, getNow());
+    if (isComposingEvent(event)) {
+      markCompositionStart(el);
+      recordHistoryEventRate('checker:input-composing', getCheckerElementLogData(el));
+      return;
+    }
+    if (isEditableComposing(el)) {
+      recordHistoryEventRate('checker:input-while-composing', getCheckerElementLogData(el));
+      return;
+    }
     clearVisibleIssuesForPendingEdit(el);
     recordHistoryEventRate('checker:input', getCheckerElementLogData(el));
     scheduleCheck(el);
@@ -1205,25 +1314,18 @@ function mirrorTextarea(textarea: HTMLTextAreaElement): HTMLElement | null {
 function isStetOwnedNode(node: Node): boolean {
   const el = node instanceof Element ? node : node.parentElement;
   if (!el) return false;
-  return !!el.closest('.stet-overlay-root, .stet-history-root, .stet-card');
+  return !!el.closest(STET_OWNED_SELECTOR);
 }
 
-function isGoogleDocsChromeNode(node: Node): boolean {
-  const el = node instanceof Element ? node : node.parentElement;
-  if (!el) return false;
-  return !!el.closest('.kix-cursor, .kix-cursor-caret, .kix-selection-overlay');
+function isStetOwnedMutation(mutation: MutationRecord): boolean {
+  if (isStetOwnedNode(mutation.target)) return true;
+  const changedNodes = [...mutation.addedNodes, ...mutation.removedNodes];
+  return changedNodes.length > 0 && changedNodes.every((node) => isStetOwnedNode(node));
 }
 
 function shouldIgnoreMutation(mutation: MutationRecord): boolean {
-  if (isStetOwnedNode(mutation.target)) return true;
-
-  const changedNodes = [...mutation.addedNodes, ...mutation.removedNodes];
-  if (changedNodes.length > 0 && changedNodes.every((node) => isGoogleDocsChromeNode(node))) {
-    return true;
-  }
-
-  if (!isGoogleDocsChromeNode(mutation.target)) return false;
-  return changedNodes.every((node) => isGoogleDocsChromeNode(node));
+  if (isStetOwnedMutation(mutation)) return true;
+  return isGoogleDocsChromeMutation(mutation);
 }
 
 function observeDOM() {
@@ -1283,6 +1385,10 @@ function observeDOM() {
 
     changedEditables.forEach((editable) => {
       if (!editable.isConnected) return;
+      if (isEditableComposing(editable)) {
+        recordHistoryEventRate('checker:mutation-skip-composing', getCheckerElementLogData(editable));
+        return;
+      }
 
       const lastInputAt = recentInputAt.get(editable);
       if (typeof lastInputAt === 'number' && getNow() - lastInputAt < INPUT_MUTATION_SUPPRESS_MS) {
@@ -1321,7 +1427,7 @@ function observeDOM() {
 async function loadSpellCheckDictionary(): Promise<string[]> {
   try {
     const [words, customTerms] = await Promise.all([
-      loadDictionary(),
+      loadDictionary(config?.language ?? 'en-GB'),
       loadCustomTerms(),
     ]);
     return [...words, ...customTerms];
@@ -1336,6 +1442,61 @@ function loadSpellCheckDictionaryOnce(): Promise<string[]> {
     dictionaryLoadPromise = loadSpellCheckDictionary();
   }
   return dictionaryLoadPromise;
+}
+
+function resolveRuntimeConfig(nextConfig: ResolvedStetConfig): ResolvedStetConfig {
+  const registered = listPacks().map(p => p.id);
+  let resolved = { ...nextConfig, packs: registered };
+
+  // If bt-pack is active, disable common spell check for English flows.
+  // zh-SG relies on COMMON-SPELL-01 because bt-pack spellcheck is Latin-script only.
+  if (registered.includes('bt') && resolved.language !== 'zh-SG') {
+    const disabled = resolved.rules?.disable ?? [];
+    if (!disabled.includes('COMMON-SPELL-01')) {
+      resolved = {
+        ...resolved,
+        rules: { ...resolved.rules, disable: [...disabled, 'COMMON-SPELL-01'] },
+      };
+    }
+  }
+
+  return resolved;
+}
+
+function applyLoadedDictionary(words: string[], onDictionaryLoaded?: OnDictionaryLoaded) {
+  onDictionaryLoaded?.(words);
+  console.log(`[stet] Dictionary ready (${words.length} words)`);
+  refreshAllChecks();
+}
+
+async function refreshRuntimeState(onDictionaryLoaded?: OnDictionaryLoaded) {
+  config = resolveRuntimeConfig(await loadConfig());
+  dictionaryLoadPromise = null;
+
+  try {
+    const words = await loadSpellCheckDictionaryOnce();
+    applyLoadedDictionary(words, onDictionaryLoaded);
+  } catch (err) {
+    console.warn('[stet] Dictionary reload failed:', err);
+    onDictionaryLoaded?.([]);
+    refreshAllChecks();
+  }
+}
+
+function registerStorageChangeListener(onDictionaryLoaded?: OnDictionaryLoaded) {
+  if (storageChangeListenerRegistered) return;
+
+  try {
+    chrome.storage.onChanged.addListener((changes, areaName) => {
+      if (areaName !== 'sync') return;
+      if (!('resolvedConfig' in changes) && !('userOverrides' in changes) && !('stet_custom_terms' in changes)) {
+        return;
+      }
+
+      void refreshRuntimeState(onDictionaryLoaded);
+    });
+    storageChangeListenerRegistered = true;
+  } catch {}
 }
 
 /** Callback type for dictionary loading hook */
@@ -1358,17 +1519,7 @@ export async function initChecker(onDictionaryLoaded?: OnDictionaryLoaded) {
   config = await loadConfig();
   historyFeatureEnabled = await loadHistoryFeatureEnabled();
 
-  // Override config packs with whatever is actually registered
-  const registered = listPacks().map(p => p.id);
-  config = { ...config, packs: registered };
-
-  // If bt-pack is active, disable common spell check (bt-pack's is more complete)
-  if (registered.includes('bt')) {
-    const disabled = config.rules?.disable ?? [];
-    if (!disabled.includes('COMMON-SPELL-01')) {
-      config = { ...config, rules: { ...config.rules, disable: [...disabled, 'COMMON-SPELL-01'] } };
-    }
-  }
+  config = resolveRuntimeConfig(config);
 
   // Sync actual packs back to storage so popup reflects reality
   try {
@@ -1385,7 +1536,7 @@ export async function initChecker(onDictionaryLoaded?: OnDictionaryLoaded) {
     return;
   }
 
-  console.log('[stet] Active — packs:', registered.map(id => {
+  console.log('[stet] Active — packs:', config.packs.map(id => {
     const p = listPacks().find(p => p.id === id);
     return `${id} (${p?.rules.length ?? 0} rules)`;
   }).join(', '));
@@ -1393,7 +1544,9 @@ export async function initChecker(onDictionaryLoaded?: OnDictionaryLoaded) {
   discoverEditables();
   observeDOM();
   registerLateEditableDiscovery();
+  registerCompositionTracking();
   registerRuntimeHandlers();
+  registerStorageChangeListener(onDictionaryLoaded);
   if (historyFeatureEnabled) {
     registerHistoryTracking();
   }
@@ -1403,10 +1556,6 @@ export async function initChecker(onDictionaryLoaded?: OnDictionaryLoaded) {
 
   // Load dictionary in the background — doesn't block initial check
   loadSpellCheckDictionaryOnce().then((words) => {
-    if (words.length > 0 && onDictionaryLoaded) {
-      onDictionaryLoaded(words);
-      console.log(`[stet] Dictionary ready (${words.length} words)`);
-      refreshAllChecks();
-    }
+    applyLoadedDictionary(words, onDictionaryLoaded);
   });
 }

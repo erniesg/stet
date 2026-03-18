@@ -9,7 +9,9 @@ import {
   getEffectiveConfig,
   getHistorySettings,
   DEFAULT_STORED_SETTINGS,
+  updateUserOverrides,
 } from '../storage/settings.js';
+import { getProfile } from '../storage/profiles.js';
 
 interface PopupIssueRecord {
   key: string;
@@ -618,10 +620,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     case 'UPDATE_USER_OVERRIDES':
       // Partial-merge user overrides
-      loadSettings().then(async ({ userOverrides }) => {
-        await saveSettings({
-          userOverrides: { ...userOverrides, ...message.overrides },
-        });
+      updateUserOverrides(message.overrides ?? {}).then(() => {
         sendResponse({ ok: true });
       });
       return true;
@@ -632,6 +631,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ ok: true });
       });
       return true;
+
+    case 'APPLY_PROFILE': {
+      const preset = getProfile(typeof message.profileId === 'string' ? message.profileId : 'standard');
+      updateUserOverrides({
+        profileId: preset.id,
+        language: undefined,
+        role: undefined,
+        disableRules: undefined,
+      }).then(() => {
+        sendResponse({ ok: true, profileId: preset.id });
+      });
+      return true;
+    }
 
     case 'SYNC_PAGE_ISSUES':
       if (typeof sender.tab?.id === 'number') {

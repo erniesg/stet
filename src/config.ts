@@ -105,10 +105,27 @@ export function applyUserOverrides(
   base: ResolvedStetConfig,
   overrides: UserOverrides,
 ): ResolvedStetConfig {
-  const result = { ...base };
+  const result: ResolvedStetConfig = {
+    ...base,
+    packs: [...base.packs],
+    packConfig: { ...base.packConfig },
+    rules: {
+      enable: [...base.rules.enable],
+      disable: [...base.rules.disable],
+    },
+    dictionaries: [...base.dictionaries],
+    prompts: { ...base.prompts },
+    workflows: { ...base.workflows },
+    feedback: { ...base.feedback },
+    siteAllowlist: [...base.siteAllowlist],
+  };
 
   if (overrides.enabled !== undefined) {
     result.enabled = overrides.enabled;
+  }
+  if (overrides.language) {
+    result.language = overrides.language;
+    result.packConfig.language = overrides.language;
   }
   if (overrides.role) {
     result.role = overrides.role;
@@ -143,6 +160,6 @@ export function toCheckOptions(config: ResolvedStetConfig): import('./types.js')
     role: config.role,
     enabledRules: config.rules.enable.length > 0 ? config.rules.enable : undefined,
     disabledRules: config.rules.disable.length > 0 ? config.rules.disable : undefined,
-    configOverrides: config.packConfig,
+    configOverrides: { ...config.packConfig, language: config.language },
   };
 }

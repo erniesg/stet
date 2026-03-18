@@ -8,18 +8,17 @@ stet-mark,
 
 /* Inline underlines by category */
 stet-mark {
-  text-decoration-line: underline;
-  text-decoration-style: solid;
-  text-decoration-color: var(--stet-annotation-color);
-  outline: none;
-  text-decoration-thickness: 2px;
-  text-underline-offset: 3px;
-  text-decoration-skip-ink: none;
+  text-decoration-line: underline !important;
+  text-decoration-style: solid !important;
+  text-decoration-color: var(--stet-annotation-color) !important;
+  text-decoration-thickness: 2px !important;
+  text-underline-offset: 3px !important;
+  text-decoration-skip-ink: none !important;
+  outline: none !important;
   cursor: pointer;
   position: relative;
   border-radius: 3px;
   background: linear-gradient(to top, var(--stet-annotation-tint), transparent 60%);
-  outline: none;
   transition: background 0.15s;
 }
 
@@ -58,6 +57,11 @@ stet-mark:hover {
   height: 0;
   z-index: 2147483644;
   pointer-events: none;
+  will-change: transform;
+}
+
+.stet-overlay-root[data-stet-host="google-docs"] {
+  z-index: 600;
 }
 
 .stet-overlay-mark {
@@ -97,6 +101,10 @@ stet-mark:hover {
   font-size: 13px;
   line-height: 1.5;
   color: #2d3748;
+}
+
+.stet-card[data-stet-host="google-docs"] {
+  z-index: 620;
 }
 
 .stet-card-header {
@@ -202,6 +210,10 @@ stet-mark:hover {
   align-items: flex-end;
   gap: 12px;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+.stet-history-root[data-stet-host="google-docs"] {
+  z-index: 610;
 }
 
 .stet-history-root.is-field-mode {

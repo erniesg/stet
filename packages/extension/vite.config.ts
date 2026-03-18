@@ -19,6 +19,10 @@ function copyExtensionAssets() {
         resolve(dist, 'wordlist-en.txt'),
       );
       copyFileSync(
+        resolve(__dirname, '..', '..', 'data', 'wordlist-zh-sg.txt'),
+        resolve(dist, 'wordlist-zh-sg.txt'),
+      );
+      copyFileSync(
         resolve(__dirname, 'src/content/page-debug-bridge.js'),
         resolve(dist, 'page-debug-bridge.js'),
       );
