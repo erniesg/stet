@@ -36,10 +36,10 @@ const CPI_PASS = process.env.STET_CPI_PASSWORD || 'stet-test-pw';
 const TRACE_PORT = Number(process.env.STET_TRACE_PORT || 5123);
 const ARTICLE_MS = Number(process.env.STET_ARTICLE_WAIT_MS || 120_000);
 const EXT = path.resolve(process.env.STET_EXTENSION_PATH || 'packages/extension/dist');
-const PDF = path.resolve(process.env.STET_CPI_PDF || '../bt-ai-tools/assets/cpi/Consumer Price Developments in January 2026.pdf');
+const PDF = process.env.STET_CPI_PDF ? path.resolve(process.env.STET_CPI_PDF) : '';
 const TRACE = `http://127.0.0.1:${TRACE_PORT}`;
 const OBSERVE_MS = 25_000;
-const EDITOR = '#bt-editor-content[contenteditable="true"]';
+const EDITOR = process.env.STET_EDITOR_SELECTOR || '[contenteditable="true"]';
 const INTERACTION_SETTLE_MS = 800;
 
 // ---------------------------------------------------------------------------

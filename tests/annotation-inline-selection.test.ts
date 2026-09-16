@@ -35,7 +35,7 @@ describe('AnnotationManager inline selection restore', () => {
     const manager = new AnnotationManager(mirror);
     manager.annotate([
       {
-        rule: 'BT-SPELL-01',
+        rule: 'CUSTOM-SPELL-01',
         severity: 'warning',
         offset: 0,
         length: 3,

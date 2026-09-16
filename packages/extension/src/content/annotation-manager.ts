@@ -279,7 +279,7 @@ export class AnnotationManager {
   private dismissedFingerprints = new Set<string>();
   private overlayTracking = false;
   private overlayRefreshFrame: number | null = null;
-  private overlayReconcileTimer: ReturnType<typeof setTimeout> | null = null;
+  private overlayReconcileTimer: number | null = null;
   private overlayFollowFrame: number | null = null;
   private overlayFollowUntil = 0;
   private overlaySuppressed = false;

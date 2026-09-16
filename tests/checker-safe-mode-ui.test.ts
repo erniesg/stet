@@ -123,7 +123,7 @@ describe('checker safe mode ui', () => {
     vi.restoreAllMocks();
   });
 
-  it('shows the outside-editor issue panel for textarea surfaces', async () => {
+  it('surfaces textarea issues through the mirror and popup state', async () => {
     const { listeners } = createChromeMock();
     const { initChecker } = await import('../packages/extension/src/content/checker.js');
 
@@ -139,17 +139,8 @@ describe('checker safe mode ui', () => {
     textarea.dispatchEvent(new Event('input', { bubbles: true }));
     await waitForChecks();
 
-    const button = document.querySelector('.stet-issues-button') as HTMLButtonElement;
-    expect(button).not.toBeNull();
-    expect(button.hidden).toBe(false);
-    expect(button.textContent).toContain('1 issue');
-
-    button.click();
-
-    const panel = document.querySelector('.stet-issues-panel') as HTMLElement;
-    expect(panel.hidden).toBe(false);
-    expect(panel.textContent).toContain('SPELL');
-    expect(panel.textContent).toContain('teh -> the');
+    expect(document.querySelector('.stet-issues-button')).toBeNull();
+    expect(document.querySelectorAll('stet-mark').length).toBeGreaterThan(0);
 
     const popupState = await dispatchRuntimeMessage(listeners[0], {
       type: 'GET_PAGE_ISSUES',

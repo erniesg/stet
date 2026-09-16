@@ -118,12 +118,12 @@ describe('extension settings normalization', () => {
     installChromeStorageSync({
       resolvedConfig: DEFAULT_RESOLVED_CONFIG,
       userOverrides: {
-        packs: ['common', '', 'bt', '  '],
+        packs: ['common', '', '@example/style-pack', '  '],
       },
     });
 
     const settings = await loadSettings();
-    expect(settings.userOverrides.packs).toEqual(['common', 'bt']);
+    expect(settings.userOverrides.packs).toEqual(['common', '@example/style-pack']);
   });
 
   it('omits packs override when empty after normalization', async () => {
@@ -142,14 +142,14 @@ describe('extension settings normalization', () => {
     installChromeStorageSync({
       resolvedConfig: {
         ...DEFAULT_RESOLVED_CONFIG,
-        packs: ['common', 'bt', 'tia'],
+        packs: ['common', '@example/style-pack', './local-rules'],
       },
       userOverrides: {
-        packs: ['common', 'bt'],
+        packs: ['common', '@example/style-pack'],
       },
     });
 
     const effective = await getEffectiveConfig();
-    expect(effective.packs).toEqual(['common', 'bt']);
+    expect(effective.packs).toEqual(['common', '@example/style-pack']);
   });
 });

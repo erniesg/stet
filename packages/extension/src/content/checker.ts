@@ -1074,11 +1074,9 @@ function unregisterGoogleDocsCompositionBridge(element: HTMLElement) {
   googleDocsCompositionBridges.delete(element);
 }
 
-let packDiscoveryRegistered = false;
-
-function registerPackDiscoveryHandler() {
-  if (packDiscoveryRegistered) return;
-  packDiscoveryRegistered = true;
+function registerRuntimeHandlers() {
+  if (runtimeHandlersRegistered) return;
+  runtimeHandlersRegistered = true;
 
   try {
     chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -1093,16 +1091,7 @@ function registerPackDiscoveryHandler() {
         });
         return false;
       }
-    });
-  } catch {}
-}
 
-function registerRuntimeHandlers() {
-  if (runtimeHandlersRegistered) return;
-  runtimeHandlersRegistered = true;
-
-  try {
-    chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       if (message?.type === 'RELOAD_CONFIG_AND_RECHECK') {
         loadConfig().then((newConfig) => {
           config = resolveRuntimeConfig(newConfig);
@@ -1473,21 +1462,7 @@ function resolveRuntimeConfig(nextConfig: ResolvedStetConfig): ResolvedStetConfi
   // so resolveRuntimeConfig sees the already-filtered list. We restore all registered
   // packs here so that SET_RESOLVED_CONFIG syncs the full set to storage for the popup.
   const registered = listPacks().map(p => p.id);
-  let resolved = { ...nextConfig, packs: registered };
-
-  // If bt-pack is active, disable common spell check for English flows.
-  // zh-SG relies on COMMON-SPELL-01 because bt-pack spellcheck is Latin-script only.
-  if (registered.includes('bt') && resolved.language !== 'zh-SG') {
-    const disabled = resolved.rules?.disable ?? [];
-    if (!disabled.includes('COMMON-SPELL-01')) {
-      resolved = {
-        ...resolved,
-        rules: { ...resolved.rules, disable: [...disabled, 'COMMON-SPELL-01'] },
-      };
-    }
-  }
-
-  return resolved;
+  return { ...nextConfig, packs: registered };
 }
 
 function applyLoadedDictionary(words: string[], onDictionaryLoaded?: OnDictionaryLoaded) {
@@ -1534,7 +1509,7 @@ export type OnDictionaryLoaded = (words: string[]) => void;
  *
  * @param onDictionaryLoaded — optional callback invoked when the spell-check
  *   dictionary is ready. Packs use this to feed words into their spell-check
- *   rules (e.g., `loadWordList(words)` in bt-pack).
+ *   rules (e.g., `loadWordList(words)` in a custom pack).
  */
 export async function initChecker(onDictionaryLoaded?: OnDictionaryLoaded) {
   if (checkerInitialized) {
@@ -1556,9 +1531,9 @@ export async function initChecker(onDictionaryLoaded?: OnDictionaryLoaded) {
     });
   } catch {}
 
-  // Register GET_REGISTERED_PACKS early so the popup can discover packs
+  // Register runtime handlers early so the popup can discover packs
   // even on pages where the checker is disabled or host is not allowed.
-  registerPackDiscoveryHandler();
+  registerRuntimeHandlers();
 
   if (!config.enabled) { console.log('[stet] Disabled'); return; }
 
@@ -1576,7 +1551,6 @@ export async function initChecker(onDictionaryLoaded?: OnDictionaryLoaded) {
   observeDOM();
   registerLateEditableDiscovery();
   registerCompositionTracking();
-  registerRuntimeHandlers();
   registerStorageChangeListener(onDictionaryLoaded);
   if (historyFeatureEnabled) {
     registerHistoryTracking();

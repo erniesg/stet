@@ -152,7 +152,7 @@ export interface DictionaryEntry {
 
 /** A rule pack (tenant-specific collection of rules) */
 export interface RulePack {
-  /** Pack ID: 'common', 'bt', 'tia' */
+  /** Pack ID, e.g. 'common', '@example/style-pack', './local-rules' */
   id: string;
   /** Display name */
   name: string;
@@ -255,9 +255,9 @@ export interface FxRateResult {
  * This keeps CI and agent consumers deterministic.
  */
 export interface HostServices {
-  /** Fetch a foreign exchange rate. Used by BT-CUR-02 (currency conversion). */
+  /** Fetch a foreign exchange rate for async currency rules. */
   fetchFxRate?: (from: string, to: string) => Promise<FxRateResult>;
-  /** Run an LLM check on text. Used by BT-SPELL-LLM (optional spelling). */
+  /** Run an LLM check on text for optional enrichment rules. */
   llmCheck?: (text: string, prompt: string) => Promise<string>;
   /** Invoke a named workflow (e.g. post-check webhook). */
   invokeWorkflow?: (name: string, payload: unknown) => Promise<unknown>;

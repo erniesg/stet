@@ -36,7 +36,7 @@ Exit code 1 if issues found (CI-friendly).
 
 ## Built-in rules (common pack)
 
-10 rules focused on universal readability, backed by 800+ curated data entries from plain language guidelines, grammar references, and editorial review.
+13 public rules focused on readability, spelling, and broadly reusable editorial checks, backed by curated data from plain language guidelines, grammar references, and editorial review.
 
 | Rule | What it checks | Severity |
 |------|---------------|----------|
@@ -50,6 +50,9 @@ Exit code 1 if issues found (CI-friendly).
 | COMMON-PARA-01 | Long paragraphs (>320 chars) | warning |
 | COMMON-SPACE-01 | Double spaces, trailing whitespace | info |
 | COMMON-REPEAT-01 | Repetitive words | warning |
+| COMMON-CAPS-01 | Lowercase sentence starts | warning |
+| COMMON-SPELL-01 | Dictionary spellcheck | warning |
+| COMMON-ZHSG-TERM-01 | Singapore Chinese terminology variants | warning |
 
 House-style rules (number formatting, currency, terminology) belong in custom packs — see below.
 
@@ -90,6 +93,23 @@ rules:
 ```
 
 `language` accepts `en-GB`, `en-US`, and `zh-SG`.
+
+For Node and CLI usage, import/register any custom packs before loading a config that references them. The config selects already-registered packs; it does not execute arbitrary package code by itself.
+
+```typescript
+import { check, registerPack } from 'stet';
+import { ukStylePack, customHouseStylePack } from './examples/public-style-packs';
+
+registerPack(ukStylePack);
+registerPack(customHouseStylePack);
+
+const issues = check('We organize the color centre!', {
+  packs: ['common', 'example/uk-style', 'example/custom-house-style'],
+  configOverrides: { language: 'en-GB' },
+});
+```
+
+The repo includes [examples/public-style-packs.ts](./examples/public-style-packs.ts) and [examples/stet.config.yaml](./examples/stet.config.yaml) to show US style, UK style, and user-owned custom rules. For Chrome MV3 extension builds, custom packs must be bundled at build time; the extension should not fetch and execute arbitrary rule packages from synced settings.
 
 ## Chinese spellcheck
 
@@ -142,6 +162,24 @@ const myPack: RulePack = {
 
 registerPack(myPack);
 ```
+
+## Browser extension customization
+
+The public extension entry point registers only `commonPack`. Product-specific extension builds should bundle their own packs in their content-script entry and keep any private rules, data, host adapters, and branding outside this repo.
+
+If a host page owns its editor DOM, expose a generic bridge instead of letting Stet mutate the editor directly:
+
+```typescript
+window.__stetHostEditor__ = {
+  element: document.querySelector('#story-editor'),
+  getText: () => editor.getPlainText(),
+  setText: (next) => editor.setPlainText(next),
+  replaceRange: (start, end, replacement) => editor.replaceText(start, end, replacement),
+  supportsRangeReplace: true,
+};
+```
+
+Stet will read/write through the bridge and render overlay annotations over the host surface.
 
 ## Roles
 

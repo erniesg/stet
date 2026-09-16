@@ -119,12 +119,12 @@ describe('checker host-managed history reads', () => {
     vi.restoreAllMocks();
     vi.resetModules();
     document.body.innerHTML = '';
-    delete window.btEditor;
+    delete window.__stetHostEditor__;
   });
 
   afterEach(() => {
     document.body.innerHTML = '';
-    delete window.btEditor;
+    delete window.__stetHostEditor__;
     vi.restoreAllMocks();
   });
 
@@ -134,16 +134,16 @@ describe('checker host-managed history reads', () => {
     const { getEditableTarget } = await import('../packages/extension/src/content/editable-target.js');
 
     document.body.innerHTML = `
-      <div id="bt-editor-content" contenteditable="true" aria-label="Body">
+      <div id="host-editor-content" contenteditable="true" aria-label="Body">
         <span class="fig-ref">Rendered DOM text</span>
       </div>
     `;
 
-    const editor = document.getElementById('bt-editor-content') as HTMLElement;
+    const editor = document.getElementById('host-editor-content') as HTMLElement;
     mockRect(editor);
 
-    let plainText = 'Adapter text from BTEditor';
-    window.btEditor = {
+    let plainText = 'Adapter text from host editor';
+    window.__stetHostEditor__ = {
       contentEl: editor,
       getText: vi.fn(() => plainText),
       setText: vi.fn((text: string) => {
@@ -163,7 +163,7 @@ describe('checker host-managed history reads', () => {
     }) as { ok: boolean; currentText: string };
 
     expect(historyState.ok).toBe(true);
-    expect(historyState.currentText).toBe('Adapter text from BTEditor');
+    expect(historyState.currentText).toBe('Adapter text from host editor');
 
     const snapshotState = await dispatchRuntimeMessage(listeners[0], {
       type: 'CAPTURE_EDITOR_SNAPSHOT',
@@ -171,6 +171,6 @@ describe('checker host-managed history reads', () => {
     }) as { ok: boolean; currentText: string };
 
     expect(snapshotState.ok).toBe(true);
-    expect(snapshotState.currentText).toBe('Adapter text from BTEditor');
+    expect(snapshotState.currentText).toBe('Adapter text from host editor');
   });
 });

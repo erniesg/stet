@@ -26,36 +26,28 @@ function mockRect(element: HTMLElement, width = 320, height = 120) {
   });
 }
 
-describe('BTEditor host adapter', () => {
+describe('host editor adapter', () => {
   beforeEach(() => {
     document.body.innerHTML = '';
-    delete window.btAiEditor;
-    delete window.btAiEditors;
-    delete window.btEditor;
-    delete window.btEditors;
-    delete window.__BT_AI_EDITORS__;
-    delete window.__BT_EDITORS__;
+    delete window.__STET_HOST_EDITOR__;
+    delete window.__stetHostEditor__;
     delete window.__STET_HOST_EDITORS__;
     delete window.__stetHostEditors__;
   });
 
   afterEach(() => {
     document.body.innerHTML = '';
-    delete window.btAiEditor;
-    delete window.btAiEditors;
-    delete window.btEditor;
-    delete window.btEditors;
-    delete window.__BT_AI_EDITORS__;
-    delete window.__BT_EDITORS__;
+    delete window.__STET_HOST_EDITOR__;
+    delete window.__stetHostEditor__;
     delete window.__STET_HOST_EDITORS__;
     delete window.__stetHostEditors__;
     vi.restoreAllMocks();
   });
 
-  it('routes editable target reads and writes through the BTEditor API', () => {
-    document.body.innerHTML = `<div id="bt-editor-content" contenteditable="true" aria-label="Body"></div>`;
+  it('routes editable target reads and writes through the host editor API', () => {
+    document.body.innerHTML = `<div id="host-editor-content" contenteditable="true" aria-label="Body"></div>`;
 
-    const editor = document.getElementById('bt-editor-content') as HTMLElement;
+    const editor = document.getElementById('host-editor-content') as HTMLElement;
     mockRect(editor);
 
     const onInput = vi.fn();
@@ -70,7 +62,7 @@ describe('BTEditor host adapter', () => {
       editor.innerHTML = `<span class="fig-ref">${text}</span>`;
     });
 
-    window.btEditor = {
+    window.__stetHostEditor__ = {
       contentEl: editor,
       getText,
       setText,
@@ -89,17 +81,17 @@ describe('BTEditor host adapter', () => {
     expect(onChange).toHaveBeenCalled();
   });
 
-  it('falls back to full-text writes instead of mutating BTEditor ranges directly', () => {
-    document.body.innerHTML = `<div id="bt-editor-content" contenteditable="true" aria-label="Body">Alpha beta</div>`;
+  it('falls back to full-text writes instead of mutating host editor ranges directly', () => {
+    document.body.innerHTML = `<div id="host-editor-content" contenteditable="true" aria-label="Body">Alpha beta</div>`;
 
-    const editor = document.getElementById('bt-editor-content') as HTMLElement;
+    const editor = document.getElementById('host-editor-content') as HTMLElement;
     mockRect(editor);
 
     const setText = vi.fn((text: string) => {
       editor.innerHTML = `<span class="fig-ref">${text}</span>`;
     });
 
-    window.btEditor = {
+    window.__stetHostEditor__ = {
       contentEl: editor,
       getText: () => 'Alpha beta',
       setText,
@@ -113,7 +105,7 @@ describe('BTEditor host adapter', () => {
     expect(editor.querySelector('.fig-ref')?.textContent).toBe('Gamma beta');
   });
 
-  it('discovers and routes BT AI editors registered through a registry object', () => {
+  it('discovers and routes host editors registered through a registry object', () => {
     document.body.innerHTML = `
       <section id="shell">
         <div id="rewrite-editor" aria-label="Rewrite Body">
@@ -132,7 +124,7 @@ describe('BTEditor host adapter', () => {
       editor.querySelector('.rendered')!.textContent = text;
     });
 
-    window.btEditors = {
+    window.__stetHostEditors__ = {
       rewrite: {
         element: editor,
         readText,
@@ -154,7 +146,7 @@ describe('BTEditor host adapter', () => {
     expect(editor.querySelector('.rendered')?.textContent).toBe('Updated rewrite draft');
   });
 
-  it('uses adapter range replacement when a BT AI editor exposes it', () => {
+  it('uses adapter range replacement when a host editor exposes it', () => {
     document.body.innerHTML = `<div id="headline-editor" aria-label="Headline"></div>`;
 
     const editor = document.getElementById('headline-editor') as HTMLElement;
@@ -166,7 +158,7 @@ describe('BTEditor host adapter', () => {
       return true;
     });
 
-    window.__BT_AI_EDITORS__ = [
+    window.__STET_HOST_EDITORS__ = [
       {
         element: editor,
         getText: () => plainText,
