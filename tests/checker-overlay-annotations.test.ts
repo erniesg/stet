@@ -6,13 +6,13 @@ vi.mock('stet', () => ({
   check: vi.fn(() => []),
   checkDocument: vi.fn(() => [
     {
-      rule: 'BT-DICT-01',
+      rule: 'CUSTOM-DICT-01',
       severity: 'warning',
       offset: 6,
       length: 5,
       originalText: 'while',
       suggestion: 'whilst',
-      description: 'Use the CPI house style term.',
+      description: 'Use the custom house style term.',
       canFix: true,
     },
   ]),
@@ -127,26 +127,26 @@ describe('checker overlay annotations', () => {
 
   afterEach(() => {
     document.body.innerHTML = '';
-    delete window.btEditor;
+    delete window.__stetHostEditor__;
     delete (HTMLElement.prototype as { isContentEditable?: boolean }).isContentEditable;
     vi.restoreAllMocks();
   });
 
-  it('renders clickable overlay marks for BTEditor-style host surfaces', async () => {
+  it('renders clickable overlay marks for registered host editor surfaces', async () => {
     createChromeMock();
     const { initChecker } = await import('../packages/extension/src/content/checker.js');
 
     document.body.innerHTML = `
-      <div id="bt-editor-content" class="ProseMirror" contenteditable="true" aria-label="Body">
+      <div id="host-editor-content" class="ProseMirror" contenteditable="true" aria-label="Body">
         <p>Alpha <span class="fig-ref">while</span> beta</p>
       </div>
     `;
 
-    const editor = document.getElementById('bt-editor-content') as HTMLElement;
+    const editor = document.getElementById('host-editor-content') as HTMLElement;
     mockRect(editor);
 
     let plainText = 'Alpha while beta';
-    window.btEditor = {
+    window.__stetHostEditor__ = {
       contentEl: editor,
       getText: vi.fn(() => plainText),
       setText: vi.fn((text: string) => {
@@ -168,7 +168,7 @@ describe('checker overlay annotations', () => {
 
     const card = document.querySelector('.stet-card') as HTMLElement | null;
     expect(card).not.toBeNull();
-    expect(card?.textContent).toContain('BT-DICT-01');
+    expect(card?.textContent).toContain('CUSTOM-DICT-01');
     expect(card?.textContent).toContain('while');
     expect(card?.textContent).toContain('whilst');
   });

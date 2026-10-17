@@ -23,7 +23,8 @@
     "stet": "./dist/cli.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "examples"
   ],
   "scripts": {
     "build": "tsup src/index.ts src/config-loader.ts src/cli.ts --format esm,cjs --dts --clean",

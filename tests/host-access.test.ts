@@ -2,11 +2,18 @@ import { describe, expect, it } from 'vitest';
 
 import {
   formatSiteAllowlist,
+  isHostAllowed,
   normalizeSiteAllowlist,
   parseSiteAllowlistInput,
 } from '../packages/extension/src/host-access.js';
 
 describe('host access helpers', () => {
+  it('treats an empty allowlist as run everywhere', () => {
+    expect(normalizeSiteAllowlist([])).toEqual([]);
+    expect(formatSiteAllowlist([])).toBe('');
+    expect(isHostAllowed('docs.google.com', [])).toBe(true);
+  });
+
   it('normalizes host entries from plain hosts and urls', () => {
     expect(normalizeSiteAllowlist([
       'Mail.Google.com',

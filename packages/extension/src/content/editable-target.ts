@@ -80,12 +80,8 @@ interface HostEditorBridge {
 
 declare global {
   interface Window {
-    btAiEditor?: HostEditorBridge;
-    btAiEditors?: HostEditorBridge[] | Record<string, HostEditorBridge> | null;
-    btEditor?: HostEditorBridge;
-    btEditors?: HostEditorBridge[] | Record<string, HostEditorBridge> | null;
-    __BT_AI_EDITORS__?: HostEditorBridge[] | Map<unknown, HostEditorBridge> | Set<HostEditorBridge> | Record<string, HostEditorBridge> | null;
-    __BT_EDITORS__?: HostEditorBridge[] | Map<unknown, HostEditorBridge> | Set<HostEditorBridge> | Record<string, HostEditorBridge> | null;
+    __STET_HOST_EDITOR__?: HostEditorBridge | null;
+    __stetHostEditor__?: HostEditorBridge | null;
     __STET_HOST_EDITORS__?: HostEditorBridge[] | Map<unknown, HostEditorBridge> | Set<HostEditorBridge> | Record<string, HostEditorBridge> | null;
     __stetHostEditors__?: HostEditorBridge[] | Map<unknown, HostEditorBridge> | Set<HostEditorBridge> | Record<string, HostEditorBridge> | null;
   }
@@ -122,7 +118,7 @@ export function getAnnotationSupport(element: HTMLElement): AnnotationSupport {
   }
 
   if (hasRegisteredHostEditable(element)) {
-    return { mode: 'inline', reason: 'host-registered-editor' };
+    return { mode: 'overlay', reason: 'host-registered-editor' };
   }
 
   if (!hasEnabledContentEditable(element)) {
@@ -132,7 +128,24 @@ export function getAnnotationSupport(element: HTMLElement): AnnotationSupport {
     };
   }
 
-  return { mode: 'inline', reason: 'contenteditable' };
+  if (hasHostManagedEditorMarker(element)) {
+    return {
+      mode: 'overlay',
+      reason: 'host-managed-editor',
+    };
+  }
+
+  if (hasSafeInlineAnnotationMarkup(element)) {
+    return {
+      mode: 'inline',
+      reason: 'safe-rich-text-dom',
+    };
+  }
+
+  return {
+    mode: 'overlay',
+    reason: 'unsafe-rich-text-dom',
+  };
 }
 
 export function supportsInlineAnnotationMarkup(element: HTMLElement): boolean {
@@ -536,7 +549,7 @@ const INLINE_ANNOTATION_ALLOWED_TAGS = new Set([
   'UL',
 ]);
 
-const HOST_MANAGED_EDITOR_PATTERN = /\b(fig-ref|bt-editor|prosemirror|ql-editor|public-drafteditor|drafteditor|lexical|slate|ck-content|mce-content-body|tox-edit-area)\b/i;
+const HOST_MANAGED_EDITOR_PATTERN = /\b(fig-ref|prosemirror|ql-editor|public-drafteditor|drafteditor|lexical|slate|ck-content|mce-content-body|tox-edit-area)\b/i;
 const HOST_MANAGED_ATTRIBUTE_PATTERN = /^(data-offset-key|data-lexical|data-slate|data-block|data-editor)/i;
 
 function hasSafeInlineAnnotationMarkup(element: HTMLElement): boolean {
@@ -981,12 +994,8 @@ function collectHostEditorBridges(win: Window): HostEditorBridge[] {
   const seen = new Set<HostEditorBridge>();
   const collected: HostEditorBridge[] = [];
   const sources = [
-    win.btEditor,
-    win.btEditors,
-    win.btAiEditor,
-    win.btAiEditors,
-    win.__BT_EDITORS__,
-    win.__BT_AI_EDITORS__,
+    win.__stetHostEditor__,
+    win.__STET_HOST_EDITOR__,
     win.__stetHostEditors__,
     win.__STET_HOST_EDITORS__,
   ];

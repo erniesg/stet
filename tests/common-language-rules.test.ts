@@ -75,7 +75,7 @@ describe('common capitalization and spelling rules', () => {
   });
 
   it('flags non-standard Chinese terms and suggests SG equivalents', () => {
-    const issues = check('记者乘坐出租车前往巴士转换站', {
+    const issues = check('记者搭出租车前往巴士转换站', {
       packs: ['common'],
       role: 'subeditor',
       enabledRules: ['COMMON-ZHSG-TERM-01'],

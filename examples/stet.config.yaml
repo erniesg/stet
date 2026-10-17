@@ -1,0 +1,17 @@
+packs:
+  - stet/common
+  - example/uk-style
+  - example/custom-house-style
+
+language: en-GB
+
+roles:
+  default: subeditor
+
+config:
+  freThreshold: 30
+  paragraphCharLimit: 320
+
+rules:
+  disable:
+    - COMMON-ADV-01

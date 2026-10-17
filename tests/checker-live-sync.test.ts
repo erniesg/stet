@@ -229,11 +229,11 @@ describe('checker live sync', () => {
     expect(document.querySelectorAll('stet-mark')).toHaveLength(0);
   });
 
-  it('keeps common spellcheck enabled for zh-SG even when bt is registered', async () => {
+  it('keeps common spellcheck enabled for zh-SG when a custom pack is registered', async () => {
     const stet = await import('stet');
     (stet.listPacks as Mock).mockReturnValue([
       { id: 'common', rules: [] },
-      { id: 'bt', rules: [] },
+      { id: 'custom-style', rules: [] },
     ]);
 
     createChromeMock({

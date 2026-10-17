@@ -43,13 +43,13 @@ describe('AnnotationManager overlay visibility', () => {
     const manager = new AnnotationManager(editor);
     manager.annotate([
       {
-        rule: 'BT-DICT-01',
+        rule: 'CUSTOM-DICT-01',
         severity: 'warning',
         offset: 6,
         length: 5,
         originalText: 'while',
         suggestion: 'whilst',
-        description: 'Use the CPI house style term.',
+        description: 'Use the custom house style term.',
         canFix: true,
       },
     ], 'overlay');
@@ -88,13 +88,13 @@ describe('AnnotationManager overlay visibility', () => {
 
     manager.annotate([
       {
-        rule: 'BT-DICT-01',
+        rule: 'CUSTOM-DICT-01',
         severity: 'warning',
         offset: 6,
         length: 5,
         originalText: 'while',
         suggestion: 'whilst',
-        description: 'Use the CPI house style term.',
+        description: 'Use the custom house style term.',
         canFix: true,
       },
     ], 'overlay');

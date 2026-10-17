@@ -262,7 +262,7 @@ describe('background tab issue sync', () => {
     const backing: StorageBacking = {
       sync: {
         resolvedConfig: {
-          packs: ['common', 'bt'],
+          packs: ['common', '@example/style-pack'],
           language: 'en-GB',
           role: 'journalist',
           packConfig: { freThreshold: 30, paragraphCharLimit: 320 },
@@ -292,7 +292,7 @@ describe('background tab issue sync', () => {
 
     expect(response.packs).toEqual([
       { id: 'common', name: 'common', ruleCount: 0 },
-      { id: 'bt', name: 'bt', ruleCount: 0 },
+      { id: '@example/style-pack', name: '@example/style-pack', ruleCount: 0 },
     ]);
   });
 });
